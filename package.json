@@ -1,0 +1,41 @@
+{
+  "name": "smarthostelfinder_proximity_based",
+  "version": "1.0.0",
+  "description": "Final year ptoject",
+  "keywords": [
+    "hostel",
+    "finder",
+    "proximity",
+    "geolocation",
+    "smart-hostel"
+  ],
+  "homepage": "https://github.com/arigavincent/SmartHostelFinder_Proximity_Based#readme",
+  "bugs": {
+    "url": "https://github.com/arigavincent/SmartHostelFinder_Proximity_Based/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/arigavincent/SmartHostelFinder_Proximity_Based.git"
+  },
+  "license": "ISC",
+  "author": "Timothy, Ariga",
+  "type": "commonjs",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "seed:admin": "node scripts/seedAdmin.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "dependencies": {
+    "bcryptjs": "^3.0.3",
+    "cors": "^2.8.6",
+    "dotenv": "^17.2.3",
+    "express": "^5.2.1",
+    "google-auth-library": "^10.5.0",
+    "jsonwebtoken": "^9.0.3",
+    "mongoose": "^9.1.5",
+    "multer": "^2.0.2",
+    "nodemailer": "^7.0.13"
+  }
+}
