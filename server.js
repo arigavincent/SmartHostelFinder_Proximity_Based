@@ -26,6 +26,7 @@ const hostelRoutes = require('./routes/hostel');
 const studentRoutes = require('./routes/student');
 const ownerRoutes = require('./routes/owner');
 const adminRoutes = require('./routes/admin');
+const bookingRoutes = require('./routes/booking');
 
 // API Routes
 app.use('/api/auth', authRoutes);
@@ -33,6 +34,7 @@ app.use('/api/hostels', hostelRoutes);
 app.use('/api/students', studentRoutes);
 app.use('/api/owners', ownerRoutes);
 app.use('/api/admin', adminRoutes);
+app.use('/api/bookings', bookingRoutes);
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {
@@ -49,7 +51,8 @@ app.get('/', (req, res) => {
             hostels: '/api/hostels',
             students: '/api/students',
             owners: '/api/owners',
-            admin: '/api/admin'
+            admin: '/api/admin',
+            bookings: '/api/bookings'
         }
     });
 });
