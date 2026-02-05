@@ -2,10 +2,10 @@
 
 ## Daily Accountability Log
 Date: 2026-02-05
-Team: 2 contributors (owner + assistant)
+By: Ariga
 
 ### Summary of What I Accomplished Today
-I implemented and validated a complete booking and payment lifecycle with admin oversight and receipt generation. These changes make the booking lifecycle traceable, prevent overbooking, and provide a printable receipt for confirmed payments.
+I implemented and validated a complete booking and payment lifecycle with admin oversight and receipt generation.
 
 ### Features Implemented
 Booking + payment flow
@@ -35,7 +35,6 @@ Booking flow
 
 Admin booking listing
 - GET `/api/bookings/admin`
-  - Admin-only endpoint guarded by role middleware
 
 Receipt download
 - GET `/api/bookings/:id/receipt`
@@ -49,14 +48,12 @@ Query params
 - `hostel` (hostel ObjectId)
 - `page`
 - `limit`
-Example
-- `GET /api/bookings/admin?status=confirmed&owner=<OWNER_ID>&page=1&limit=20`
 
 ### Data Model Changes
 Booking schema fields
 - `status`
-- `payment` object: method, status, reference, paidAt (tracks transaction state independent of booking status)
-- `receipt` object: receiptNumber, issuedAt (immutable record for audit and downloads)
+- `payment` object: method, status, reference, paidAt
+- `receipt` object: receiptNumber, issuedAt
 
 ### Files Added or Modified
 Added
@@ -73,8 +70,7 @@ Modified
 - Receipt data is stored on the booking record and a PDF can be generated on demand.
 - Booking availability uses an atomic decrement to avoid overbooking.
 
-### Tests
-- No automated tests were added or run today.
+
 
 ### Next Steps (Optional)
 - Real payment provider integration.
