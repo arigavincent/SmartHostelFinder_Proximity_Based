@@ -16,7 +16,7 @@ exports.getPendingOwners = async (req, res) => {
             owners: pendingOwners
         });
     } catch (error) {
-        res.status(500).json({ message: 'Server error.', error: error.message });
+        res.status(500).json({ message: 'Server error.' });
     }
 };
 
@@ -38,7 +38,7 @@ exports.approveOwner = async (req, res) => {
             owner
         });
     } catch (error) {
-        res.status(500).json({ message: 'Server error.', error: error.message });
+        res.status(500).json({ message: 'Server error.' });
     }
 };
 
@@ -53,7 +53,7 @@ exports.rejectOwner = async (req, res) => {
         
         res.status(200).json({ message: 'Owner rejected and removed.' });
     } catch (error) {
-        res.status(500).json({ message: 'Server error.', error: error.message });
+        res.status(500).json({ message: 'Server error.' });
     }
 };
 
@@ -68,7 +68,7 @@ exports.getPendingHostels = async (req, res) => {
             hostels: pendingHostels
         });
     } catch (error) {
-        res.status(500).json({ message: 'Server error.', error: error.message });
+        res.status(500).json({ message: 'Server error.' });
     }
 };
 
@@ -90,7 +90,7 @@ exports.approveHostel = async (req, res) => {
             hostel
         });
     } catch (error) {
-        res.status(500).json({ message: 'Server error.', error: error.message });
+        res.status(500).json({ message: 'Server error.' });
     }
 };
 
@@ -110,7 +110,7 @@ exports.rejectHostel = async (req, res) => {
         
         res.status(200).json({ message: 'Hostel rejected and removed.' });
     } catch (error) {
-        res.status(500).json({ message: 'Server error.', error: error.message });
+        res.status(500).json({ message: 'Server error.' });
     }
 };
 
@@ -129,7 +129,7 @@ exports.getDashboardStats = async (req, res) => {
         
         res.status(200).json(stats);
     } catch (error) {
-        res.status(500).json({ message: 'Server error.', error: error.message });
+        res.status(500).json({ message: 'Server error.' });
     }
 };
 
@@ -139,7 +139,7 @@ exports.getAllStudents = async (req, res) => {
         const students = await Student.find().select('-password');
         res.status(200).json(students);
     } catch (error) {
-        res.status(500).json({ message: 'Server error.', error: error.message });
+        res.status(500).json({ message: 'Server error.' });
     }
 };
 
@@ -149,11 +149,11 @@ exports.getAllOwners = async (req, res) => {
         const owners = await Owner.find().select('-password').populate('hostels');
         res.status(200).json(owners);
     } catch (error) {
-        res.status(500).json({ message: 'Server error.', error: error.message });
+        res.status(500).json({ message: 'Server error.' });
     }
 };
 
-// Create admin (super admin only - for initial setup)
+// Create admin (admin only)
 exports.createAdmin = async (req, res) => {
     try {
         const { username, email, password } = req.body;
@@ -188,6 +188,6 @@ exports.createAdmin = async (req, res) => {
         
         res.status(201).json({ message: 'Admin created successfully.' });
     } catch (error) {
-        res.status(500).json({ message: 'Server error.', error: error.message });
+        res.status(500).json({ message: 'Server error.' });
     }
 };

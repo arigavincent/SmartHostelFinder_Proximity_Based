@@ -1,6 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const dotenv = require('dotenv');
+const path = require('path');
 const connectDB = require('./config/db');
 
 // Load environment variables
@@ -9,16 +10,13 @@ dotenv.config();
 // Initialize Express app
 const app = express();
 
-// Connect to Database
-connectDB();
-
 // Middleware
 app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Static files for uploads
-app.use('/uploads', express.static('uploads'));
+// Serve only public hostel images. Keep owner documents private.
+app.use('/uploads/images', express.static(path.join(__dirname, 'uploads/images')));
 
 // Import Routes
 const authRoutes = require('./routes/auth');
@@ -27,6 +25,7 @@ const studentRoutes = require('./routes/student');
 const ownerRoutes = require('./routes/owner');
 const adminRoutes = require('./routes/admin');
 const bookingRoutes = require('./routes/booking');
+const paymentRoutes = require('./routes/payment');
 
 // API Routes
 app.use('/api/auth', authRoutes);
@@ -35,6 +34,7 @@ app.use('/api/students', studentRoutes);
 app.use('/api/owners', ownerRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/bookings', bookingRoutes);
+app.use('/api/payments', paymentRoutes);
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {
@@ -52,7 +52,8 @@ app.get('/', (req, res) => {
             students: '/api/students',
             owners: '/api/owners',
             admin: '/api/admin',
-            bookings: '/api/bookings'
+            bookings: '/api/bookings',
+            payments: '/api/payments'
         }
     });
 });
@@ -65,12 +66,23 @@ app.use((req, res) => {
 // Error handler
 app.use((err, req, res, next) => {
     console.error(err.stack);
-    res.status(500).json({ message: 'Internal server error', error: err.message });
+    res.status(500).json({ message: 'Internal server error' });
 });
 
-// Start server
 const PORT = process.env.PORT || 5100;
-app.listen(PORT, () => {
-    console.log(`\n🚀 Server running on port ${PORT}`);
-    console.log(`📡 API available at http://localhost:${PORT}`);
-});
+
+// Start only after DB connection is ready.
+const startServer = async () => {
+    try {
+        await connectDB();
+        app.listen(PORT, () => {
+            console.log(`\n🚀 Server running on port ${PORT}`);
+            console.log(`📡 API available at http://localhost:${PORT}`);
+        });
+    } catch (error) {
+        console.error('Failed to start server:', error);
+        process.exit(1);
+    }
+};
+
+startServer();

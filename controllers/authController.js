@@ -80,7 +80,7 @@ exports.registerStudent = async (req, res) => {
             user: { id: savedStudent._id, username: savedStudent.username, email: savedStudent.email }
         });
     } catch (error) {
-        res.status(500).json({ message: 'Server error.', error: error.message });
+        res.status(500).json({ message: 'Server error.' });
     }
 };
 
@@ -139,7 +139,7 @@ exports.registerOwner = async (req, res) => {
             user: { id: savedOwner._id, username: savedOwner.username, email: savedOwner.email }
         });
     } catch (error) {
-        res.status(500).json({ message: 'Server error.', error: error.message });
+        res.status(500).json({ message: 'Server error.' });
     }
 };
 
@@ -204,7 +204,7 @@ exports.login = async (req, res) => {
             user: { id: user._id, username: user.username, email: user.email, role: user.role }
         });
     } catch (error) {
-        res.status(500).json({ message: 'Server error.', error: error.message });
+        res.status(500).json({ message: 'Server error.' });
     }
 };
 
@@ -233,7 +233,7 @@ exports.getProfile = async (req, res) => {
         
         res.status(200).json(user);
     } catch (error) {
-        res.status(500).json({ message: 'Server error.', error: error.message });
+        res.status(500).json({ message: 'Server error.' });
     }
 };
 
@@ -272,7 +272,7 @@ exports.verifyEmail = async (req, res) => {
         
         res.status(200).json({ message: 'Email verified successfully. You can now login.' });
     } catch (error) {
-        res.status(500).json({ message: 'Server error.', error: error.message });
+        res.status(500).json({ message: 'Server error.' });
     }
 };
 
@@ -280,9 +280,10 @@ exports.verifyEmail = async (req, res) => {
 exports.resendVerificationEmail = async (req, res) => {
     try {
         const { email } = req.body;
-        
-        if (!email) {
-            return res.status(400).json({ message: 'Email is required.' });
+
+        const emailValidation = validateEmail(email);
+        if (!emailValidation.isValid) {
+            return res.status(400).json({ message: emailValidation.error });
         }
         
         // Search in both Student and Owner collections
@@ -309,7 +310,7 @@ exports.resendVerificationEmail = async (req, res) => {
         
         res.status(200).json({ message: 'Verification email sent.' });
     } catch (error) {
-        res.status(500).json({ message: 'Server error.', error: error.message });
+        res.status(500).json({ message: 'Server error.' });
     }
 };
 
@@ -317,6 +318,11 @@ exports.resendVerificationEmail = async (req, res) => {
 exports.forgotPassword = async (req, res) => {
     try {
         const { email } = req.body;
+
+        const emailValidation = validateEmail(email);
+        if (!emailValidation.isValid) {
+            return res.status(400).json({ message: emailValidation.error });
+        }
         
         // Check all user types
         let user = await Student.findOne({ email });
@@ -350,7 +356,7 @@ exports.forgotPassword = async (req, res) => {
             userType 
         });
     } catch (error) {
-        res.status(500).json({ message: 'Server error.', error: error.message });
+        res.status(500).json({ message: 'Server error.' });
     }
 };
 
@@ -358,9 +364,10 @@ exports.forgotPassword = async (req, res) => {
 exports.resetPassword = async (req, res) => {
     try {
         const { token, password, userType } = req.body;
-        
-        if (!token || !password) {
-            return res.status(400).json({ message: 'Token and new password are required.' });
+
+        const validation = validatePasswordReset({ token, password });
+        if (!validation.isValid) {
+            return res.status(400).json({ message: 'Validation failed.', errors: validation.errors });
         }
         
         const hashedToken = hashToken(token);
@@ -401,7 +408,7 @@ exports.resetPassword = async (req, res) => {
         
         res.status(200).json({ message: 'Password reset successful. You can now login.' });
     } catch (error) {
-        res.status(500).json({ message: 'Server error.', error: error.message });
+        res.status(500).json({ message: 'Server error.' });
     }
 };
 
@@ -427,6 +434,10 @@ exports.googleLogin = async (req, res) => {
             return res.status(400).json({ message: 'Google email not verified.' });
         }
         
+        if (userType && userType !== 'student' && userType !== 'owner') {
+            return res.status(400).json({ message: 'Invalid user type for Google login.' });
+        }
+
         const Model = userType === 'owner' ? Owner : Student;
         
         // Check if user exists
@@ -469,6 +480,6 @@ exports.googleLogin = async (req, res) => {
             user: { id: user._id, username: user.username, email: user.email, role: user.role }
         });
     } catch (error) {
-        res.status(500).json({ message: 'Google authentication failed.', error: error.message });
+        res.status(500).json({ message: 'Google authentication failed.' });
     }
 };

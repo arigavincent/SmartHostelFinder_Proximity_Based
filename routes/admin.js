@@ -2,11 +2,12 @@ const router = require('express').Router();
 const adminController = require('../controllers/adminController');
 const { verifyAdmin } = require('../middlewares/auth');
 
-// Admin creation (unprotected - for initial setup only)
-router.post('/create', adminController.createAdmin);
-
-// All routes below require admin authentication
+// All admin routes require admin authentication.
+// Use `npm run seed:admin` for first-time bootstrap.
 router.use(verifyAdmin);
+
+// Admin management
+router.post('/create', adminController.createAdmin);
 
 // Dashboard
 router.get('/stats', adminController.getDashboardStats);

@@ -37,7 +37,7 @@ const normalizeObjectId = (value) => {
 // Create booking (Student)
 exports.createBooking = async (req, res) => {
     try {
-        const { hostelId, rooms = 1, paymentMethod, amount, currency } = req.body;
+        const { hostelId, rooms = 1, paymentMethod } = req.body;
         
         if (!hostelId) {
             return res.status(400).json({ message: 'Hostel ID is required.' });
@@ -46,11 +46,6 @@ exports.createBooking = async (req, res) => {
         const roomsBooked = parseInt(rooms, 10);
         if (Number.isNaN(roomsBooked) || roomsBooked < 1) {
             return res.status(400).json({ message: 'Rooms booked must be a positive number.' });
-        }
-        
-        const bookingAmount = Number(amount);
-        if (!bookingAmount || bookingAmount <= 0) {
-            return res.status(400).json({ message: 'Amount must be greater than zero.' });
         }
         
         const method = normalizePaymentMethod(paymentMethod);
@@ -75,6 +70,16 @@ exports.createBooking = async (req, res) => {
                 message: 'Hostel unavailable or not enough rooms. Please try a different hostel or fewer rooms.' 
             });
         }
+
+        const monthlyPrice = Number(hostel.pricePerMonth);
+        if (!Number.isFinite(monthlyPrice) || monthlyPrice <= 0) {
+            await Hostel.findByIdAndUpdate(hostel._id, {
+                $inc: { availableRooms: roomsBooked }
+            });
+            return res.status(400).json({ message: 'Hostel pricing is invalid. Please contact support.' });
+        }
+
+        const bookingAmount = monthlyPrice * roomsBooked;
         
         const booking = new Booking({
             hostel: hostel._id,
@@ -82,7 +87,7 @@ exports.createBooking = async (req, res) => {
             owner: hostel.owner,
             roomsBooked,
             amount: bookingAmount,
-            currency: currency || 'KES',
+            currency: 'KES',
             payment: {
                 method,
                 status: 'pending'
@@ -104,7 +109,7 @@ exports.createBooking = async (req, res) => {
             booking: savedBooking
         });
     } catch (error) {
-        res.status(500).json({ message: 'Server error.', error: error.message });
+        res.status(500).json({ message: 'Server error.' });
     }
 };
 
@@ -145,7 +150,7 @@ exports.confirmPayment = async (req, res) => {
             booking
         });
     } catch (error) {
-        res.status(500).json({ message: 'Server error.', error: error.message });
+        res.status(500).json({ message: 'Server error.' });
     }
 };
 
@@ -175,7 +180,7 @@ exports.cancelBooking = async (req, res) => {
         
         res.status(200).json({ message: 'Booking cancelled successfully.' });
     } catch (error) {
-        res.status(500).json({ message: 'Server error.', error: error.message });
+        res.status(500).json({ message: 'Server error.' });
     }
 };
 
@@ -188,7 +193,7 @@ exports.listMyBookings = async (req, res) => {
         
         res.status(200).json(bookings);
     } catch (error) {
-        res.status(500).json({ message: 'Server error.', error: error.message });
+        res.status(500).json({ message: 'Server error.' });
     }
 };
 
@@ -202,7 +207,7 @@ exports.listOwnerBookings = async (req, res) => {
         
         res.status(200).json(bookings);
     } catch (error) {
-        res.status(500).json({ message: 'Server error.', error: error.message });
+        res.status(500).json({ message: 'Server error.' });
     }
 };
 
@@ -258,7 +263,7 @@ exports.listAdminBookings = async (req, res) => {
             currentPage: pageNumber
         });
     } catch (error) {
-        res.status(500).json({ message: 'Server error.', error: error.message });
+        res.status(500).json({ message: 'Server error.' });
     }
 };
 
@@ -326,6 +331,6 @@ exports.downloadReceipt = async (req, res) => {
 
         doc.end();
     } catch (error) {
-        res.status(500).json({ message: 'Server error.', error: error.message });
+        res.status(500).json({ message: 'Server error.' });
     }
 };

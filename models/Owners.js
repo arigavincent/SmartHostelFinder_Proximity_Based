@@ -5,7 +5,12 @@ const OwnerSchema = new mongoose.Schema({
     email: { type: String, required: true, unique: true },
     password: { type: String },
     role: { type: String, default: 'owner' },
-    businessLicense: { type: String, required: true }, 
+    businessLicense: { 
+        type: String,
+        required: function requiredBusinessLicense() {
+            return this.authProvider !== 'google';
+        }
+    }, 
     isApproved: { type: Boolean, default: false },
     hostels: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Hostel' }],
     

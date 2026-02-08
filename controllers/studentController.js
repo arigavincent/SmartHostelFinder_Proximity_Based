@@ -14,7 +14,7 @@ exports.getProfile = async (req, res) => {
         
         res.status(200).json(student);
     } catch (error) {
-        res.status(500).json({ message: 'Server error.', error: error.message });
+        res.status(500).json({ message: 'Server error.' });
     }
 };
 
@@ -34,7 +34,7 @@ exports.updateProfile = async (req, res) => {
             student: updatedStudent
         });
     } catch (error) {
-        res.status(500).json({ message: 'Server error.', error: error.message });
+        res.status(500).json({ message: 'Server error.' });
     }
 };
 
@@ -61,7 +61,7 @@ exports.addToFavorites = async (req, res) => {
         
         res.status(200).json({ message: 'Hostel added to favorites.' });
     } catch (error) {
-        res.status(500).json({ message: 'Server error.', error: error.message });
+        res.status(500).json({ message: 'Server error.' });
     }
 };
 
@@ -76,7 +76,7 @@ exports.removeFromFavorites = async (req, res) => {
         
         res.status(200).json({ message: 'Hostel removed from favorites.' });
     } catch (error) {
-        res.status(500).json({ message: 'Server error.', error: error.message });
+        res.status(500).json({ message: 'Server error.' });
     }
 };
 
@@ -91,6 +91,6 @@ exports.getFavorites = async (req, res) => {
         
         res.status(200).json(student.favorites);
     } catch (error) {
-        res.status(500).json({ message: 'Server error.', error: error.message });
+        res.status(500).json({ message: 'Server error.' });
     }
 };

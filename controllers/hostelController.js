@@ -1,6 +1,41 @@
 const Hostel = require('../models/Hostel');
 const Owner = require('../models/Owners');
 
+const OWNER_ALLOWED_HOSTEL_UPDATES = new Set([
+    'name',
+    'description',
+    'location',
+    'pricePerMonth',
+    'pricePerSemester',
+    'hostelType',
+    'roomTypes',
+    'totalRooms',
+    'availableRooms',
+    'amenities',
+    'images',
+    'contactPhone',
+    'contactEmail',
+    'isActive'
+]);
+
+const ADMIN_ALLOWED_HOSTEL_UPDATES = new Set([
+    ...OWNER_ALLOWED_HOSTEL_UPDATES,
+    'isApproved'
+]);
+
+const pickAllowedHostelUpdates = (payload, isAdmin) => {
+    const allowed = isAdmin ? ADMIN_ALLOWED_HOSTEL_UPDATES : OWNER_ALLOWED_HOSTEL_UPDATES;
+    const updates = {};
+
+    for (const [key, value] of Object.entries(payload)) {
+        if (allowed.has(key) && value !== undefined) {
+            updates[key] = value;
+        }
+    }
+
+    return updates;
+};
+
 // Create a new hostel (Owner only)
 exports.createHostel = async (req, res) => {
     try {
@@ -23,7 +58,7 @@ exports.createHostel = async (req, res) => {
             hostel: savedHostel
         });
     } catch (error) {
-        res.status(500).json({ message: 'Server error.', error: error.message });
+        res.status(500).json({ message: 'Server error.' });
     }
 };
 
@@ -56,7 +91,7 @@ exports.getAllHostels = async (req, res) => {
             total
         });
     } catch (error) {
-        res.status(500).json({ message: 'Server error.', error: error.message });
+        res.status(500).json({ message: 'Server error.' });
     }
 };
 
@@ -91,14 +126,18 @@ exports.searchByProximity = async (req, res) => {
             hostels
         });
     } catch (error) {
-        res.status(500).json({ message: 'Server error.', error: error.message });
+        res.status(500).json({ message: 'Server error.' });
     }
 };
 
 // Get single hostel by ID
 exports.getHostelById = async (req, res) => {
     try {
-        const hostel = await Hostel.findById(req.params.id)
+        const hostel = await Hostel.findOne({
+            _id: req.params.id,
+            isApproved: true,
+            isActive: true
+        })
             .populate('owner', 'username email')
             .populate('ratings.student', 'username');
         
@@ -108,7 +147,7 @@ exports.getHostelById = async (req, res) => {
         
         res.status(200).json(hostel);
     } catch (error) {
-        res.status(500).json({ message: 'Server error.', error: error.message });
+        res.status(500).json({ message: 'Server error.' });
     }
 };
 
@@ -125,11 +164,57 @@ exports.updateHostel = async (req, res) => {
         if (hostel.owner.toString() !== req.user.id && req.user.role !== 'admin') {
             return res.status(403).json({ message: 'Not authorized to update this hostel.' });
         }
+
+        const isAdmin = req.user.role === 'admin';
+        const updates = pickAllowedHostelUpdates(req.body, isAdmin);
+
+        if (Object.keys(updates).length === 0) {
+            return res.status(400).json({ message: 'No valid fields provided for update.' });
+        }
+
+        if (updates.totalRooms !== undefined) {
+            const totalRooms = Number(updates.totalRooms);
+            if (!Number.isFinite(totalRooms) || totalRooms < 0) {
+                return res.status(400).json({ message: 'Total rooms must be a non-negative number.' });
+            }
+            updates.totalRooms = totalRooms;
+        }
+
+        if (updates.availableRooms !== undefined) {
+            const availableRooms = Number(updates.availableRooms);
+            if (!Number.isFinite(availableRooms) || availableRooms < 0) {
+                return res.status(400).json({ message: 'Available rooms must be a non-negative number.' });
+            }
+            updates.availableRooms = availableRooms;
+        }
+
+        if (updates.pricePerMonth !== undefined) {
+            const pricePerMonth = Number(updates.pricePerMonth);
+            if (!Number.isFinite(pricePerMonth) || pricePerMonth <= 0) {
+                return res.status(400).json({ message: 'Monthly price must be greater than zero.' });
+            }
+            updates.pricePerMonth = pricePerMonth;
+        }
+
+        if (updates.pricePerSemester !== undefined) {
+            const pricePerSemester = Number(updates.pricePerSemester);
+            if (!Number.isFinite(pricePerSemester) || pricePerSemester <= 0) {
+                return res.status(400).json({ message: 'Semester price must be greater than zero.' });
+            }
+            updates.pricePerSemester = pricePerSemester;
+        }
+
+        const nextTotalRooms = updates.totalRooms !== undefined ? updates.totalRooms : hostel.totalRooms;
+        const nextAvailableRooms = updates.availableRooms !== undefined ? updates.availableRooms : hostel.availableRooms;
+
+        if (nextAvailableRooms > nextTotalRooms) {
+            return res.status(400).json({ message: 'Available rooms cannot exceed total rooms.' });
+        }
         
         const updatedHostel = await Hostel.findByIdAndUpdate(
             req.params.id,
-            { $set: req.body },
-            { new: true }
+            { $set: updates },
+            { new: true, runValidators: true }
         );
         
         res.status(200).json({
@@ -137,7 +222,7 @@ exports.updateHostel = async (req, res) => {
             hostel: updatedHostel
         });
     } catch (error) {
-        res.status(500).json({ message: 'Server error.', error: error.message });
+        res.status(500).json({ message: 'Server error.' });
     }
 };
 
@@ -164,7 +249,7 @@ exports.deleteHostel = async (req, res) => {
         
         res.status(200).json({ message: 'Hostel deleted successfully.' });
     } catch (error) {
-        res.status(500).json({ message: 'Server error.', error: error.message });
+        res.status(500).json({ message: 'Server error.' });
     }
 };
 
@@ -211,6 +296,6 @@ exports.addRating = async (req, res) => {
             averageRating: hostel.averageRating
         });
     } catch (error) {
-        res.status(500).json({ message: 'Server error.', error: error.message });
+        res.status(500).json({ message: 'Server error.' });
     }
 };

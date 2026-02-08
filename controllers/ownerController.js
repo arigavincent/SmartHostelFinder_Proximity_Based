@@ -14,7 +14,7 @@ exports.getProfile = async (req, res) => {
         
         res.status(200).json(owner);
     } catch (error) {
-        res.status(500).json({ message: 'Server error.', error: error.message });
+        res.status(500).json({ message: 'Server error.' });
     }
 };
 
@@ -34,7 +34,7 @@ exports.updateProfile = async (req, res) => {
             owner: updatedOwner
         });
     } catch (error) {
-        res.status(500).json({ message: 'Server error.', error: error.message });
+        res.status(500).json({ message: 'Server error.' });
     }
 };
 
@@ -48,7 +48,7 @@ exports.getMyHostels = async (req, res) => {
             hostels
         });
     } catch (error) {
-        res.status(500).json({ message: 'Server error.', error: error.message });
+        res.status(500).json({ message: 'Server error.' });
     }
 };
 
@@ -70,7 +70,7 @@ exports.getHostelStats = async (req, res) => {
         
         res.status(200).json(stats);
     } catch (error) {
-        res.status(500).json({ message: 'Server error.', error: error.message });
+        res.status(500).json({ message: 'Server error.' });
     }
 };
 
@@ -101,6 +101,6 @@ exports.updateRoomAvailability = async (req, res) => {
             hostel
         });
     } catch (error) {
-        res.status(500).json({ message: 'Server error.', error: error.message });
+        res.status(500).json({ message: 'Server error.' });
     }
 };
