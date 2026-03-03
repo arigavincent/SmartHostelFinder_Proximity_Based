@@ -2,7 +2,8 @@ const crypto = require('crypto');
 const mongoose = require('mongoose');
 const Booking = require('../models/Booking');
 const PaymentTransaction = require('../models/PaymentTransaction');
-const { initializePaymentWithProvider, normalizeProvider, parseProviderWebhook } = require('../helpers/paymentProvider');
+const { initiateSTKPush } = require("../utils/mpesa");
+const { normalizeProvider, parseProviderWebhook } = require('../helpers/paymentProvider');
 const { verifyWebhookSignature } = require('../helpers/paymentWebhookVerifier');
 
 const TERMINAL_STATUSES = new Set(['succeeded', 'failed', 'cancelled', 'timeout']);
@@ -54,7 +55,9 @@ const findTransactionFromWebhook = async (provider, parsedWebhook) => {
 
 exports.initializePayment = async (req, res) => {
     try {
-        const { bookingId, provider, payer } = req.body;
+        const { bookingId, provider, phoneNumber} = req.body;
+
+        const  payer = req.user?.id;
 
         if (!bookingId || !mongoose.Types.ObjectId.isValid(bookingId)) {
             return res.status(400).json({ message: 'Valid bookingId is required.' });
@@ -80,6 +83,11 @@ exports.initializePayment = async (req, res) => {
         const selectedProvider = normalizeProvider(provider || booking.payment?.method);
         if (!selectedProvider) {
             return res.status(400).json({ message: 'Payment provider must be mpesa or card.' });
+        }
+
+        // M-Pesa specific validation
+        if (selectedProvider === 'mpesa' && !phoneNumber) {
+            return res.status(400).json({ message: 'Phone number is required for M-Pesa payments.' });
         }
 
         const amount = Number(booking.amount);
@@ -132,20 +140,45 @@ exports.initializePayment = async (req, res) => {
         }
 
         try {
-            const providerInit = await initializePaymentWithProvider({
-                provider: selectedProvider,
-                amount,
-                currency: booking.currency || 'KES',
-                bookingId: String(booking._id),
-                idempotencyKey,
-                payer
-            });
+            let providerResponse;
 
-            transaction.status = providerInit.status || 'pending';
-            transaction.providerRequestId = providerInit.providerRequestId || transaction.providerRequestId;
-            transaction.providerCheckoutId = providerInit.providerCheckoutId || transaction.providerCheckoutId;
-            transaction.providerReference = providerInit.providerReference || transaction.providerReference;
-            transaction.rawInitResponse = providerInit.rawResponse || providerInit;
+            if (selectedProvider === 'mpesa') {
+                const callbackUrl = `${process.env.SERVER_URL}/api/v1/payments/webhook/mpesa`;
+                const stkResult = await initiateSTKPush(
+                    phoneNumber,
+                    amount,
+                    `Booking Ref: ${booking._id}`,
+                    callbackUrl
+                );
+
+                if (!stkResult.success) {
+                    throw new Error(stkResult.error || "M-Pesa STK Push failed");
+                }
+
+                providerResponse = {
+                    status: 'pending',
+                    providerRequestId: stkResult.merchantRequestID,
+                    providerCheckoutId: stkResult.checkoutRequestID,
+                    rawResponse: stkResult
+                };
+            } else {
+                // Card or other providers
+                const { initializePaymentWithProvider } = require('../helpers/paymentProvider');
+                providerResponse = await initializePaymentWithProvider({
+                    provider: selectedProvider,
+                    amount,
+                    currency: booking.currency || 'KES',
+                    bookingId: String(booking._id),
+                    idempotencyKey,
+                    payer
+                });
+            }
+
+            transaction.status = providerResponse.status || 'pending';
+            transaction.providerRequestId = providerResponse.providerRequestId || transaction.providerRequestId;
+            transaction.providerCheckoutId = providerResponse.providerCheckoutId || transaction.providerCheckoutId;
+            transaction.providerReference = providerResponse.providerReference || transaction.providerReference;
+            transaction.rawInitResponse = providerResponse.rawResponse || providerResponse;
             await transaction.save();
 
             return res.status(201).json({
@@ -154,15 +187,16 @@ exports.initializePayment = async (req, res) => {
             });
         } catch (providerError) {
             transaction.status = 'failed';
-            transaction.failureReason = 'Provider initialization failed.';
+            transaction.failureReason = providerError.message || 'Provider initialization failed.';
             transaction.rawInitResponse = { error: providerError.message };
             await transaction.save();
 
             return res.status(502).json({
-                message: 'Failed to initialize payment with provider.'
+                message: providerError.message || 'Failed to initialize payment with provider.'
             });
         }
     } catch (error) {
+        console.error('Initialize Payment Error:', error);
         return res.status(500).json({ message: 'Server error.' });
     }
 };
@@ -211,15 +245,19 @@ exports.handleWebhook = async (req, res) => {
             return res.status(400).json({ message: 'Unsupported payment provider.' });
         }
 
-        const secret = process.env.PAYMENT_WEBHOOK_SECRET;
-        const isValidSignature = verifyWebhookSignature({
-            headers: req.headers,
-            payload: req.body,
-            secret
-        });
+        // Safaricom M-Pesa typically doesn't use standard headers for signatures like Stripe.
+        // We skip verification for M-Pesa unless you have a custom security proxy.
+        if (provider !== 'mpesa') {
+            const secret = process.env.PAYMENT_WEBHOOK_SECRET;
+            const isValidSignature = verifyWebhookSignature({
+                headers: req.headers,
+                payload: req.body,
+                secret
+            });
 
-        if (!isValidSignature) {
-            return res.status(401).json({ message: 'Invalid webhook signature.' });
+            if (!isValidSignature) {
+                return res.status(401).json({ message: 'Invalid webhook signature.' });
+            }
         }
 
         let parsedWebhook;
@@ -231,7 +269,9 @@ exports.handleWebhook = async (req, res) => {
 
         const transaction = await findTransactionFromWebhook(provider, parsedWebhook);
         if (!transaction) {
-            return res.status(404).json({ message: 'Payment transaction not found.' });
+            // Log it but return 200 to Safaricom to stop retries
+            console.error(`Transaction not found for ${provider} webhook:`, parsedWebhook);
+            return res.status(200).json({ message: 'Payment transaction not found.' });
         }
 
         if (
@@ -276,12 +316,13 @@ exports.handleWebhook = async (req, res) => {
 
         const booking = await Booking.findById(updatedTransaction.booking);
         if (!booking) {
-            return res.status(404).json({ message: 'Booking not found for payment transaction.' });
+            return res.status(200).json({ message: 'Booking not found for payment transaction.' });
         }
 
         if (updatedTransaction.status === 'succeeded') {
             if (booking.status !== 'cancelled') {
                 booking.payment.status = 'paid';
+                booking.payment.method = provider;
                 booking.payment.reference =
                     updatedTransaction.providerReference
                     || updatedTransaction.providerTransactionId
@@ -289,6 +330,7 @@ exports.handleWebhook = async (req, res) => {
                     || booking.payment.reference;
                 booking.payment.paidAt = new Date();
                 booking.status = 'confirmed';
+                
                 if (!booking.receipt?.receiptNumber) {
                     booking.receipt = {
                         receiptNumber: generateReceiptNumber(),
@@ -297,24 +339,18 @@ exports.handleWebhook = async (req, res) => {
                 }
                 await booking.save();
             }
-
             return res.status(200).json({ message: 'Payment marked as succeeded.' });
         }
 
         if (updatedTransaction.status === 'failed' || updatedTransaction.status === 'timeout') {
-            if (booking.status === 'pending_payment') {
-                booking.payment.status = 'failed';
-                await booking.save();
-            }
+            booking.payment.status = 'failed';
+            await booking.save();
             return res.status(200).json({ message: 'Payment failure recorded.' });
         }
 
-        if (updatedTransaction.status === 'cancelled') {
-            return res.status(200).json({ message: 'Payment cancellation recorded.' });
-        }
-
-        return res.status(200).json({ message: 'Webhook accepted. Payment still pending.' });
+        return res.status(200).json({ message: 'Webhook processed.' });
     } catch (error) {
+        console.error('Webhook Error:', error);
         return res.status(500).json({ message: 'Server error.' });
     }
 };

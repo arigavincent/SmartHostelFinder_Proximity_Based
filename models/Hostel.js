@@ -8,9 +8,9 @@ const HostelSchema = new mongoose.Schema({
     // Location with geospatial indexing for proximity search
     location: {
         type: { type: String, enum: ['Point'], default: 'Point' },
-        coordinates: { type: [Number], required: true }, // [longitude, latitude]
-        address: { type: String, required: true },
-        city: { type: String, required: true },
+        coordinates: { type: [Number]},
+        address: { type: String},
+        city: { type: String},
         nearbyUniversity: { type: String }
     },
     

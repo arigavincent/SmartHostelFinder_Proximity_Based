@@ -1,10 +1,10 @@
 const crypto = require('crypto');
 
 const SUPPORTED_PROVIDERS = new Set(['mpesa', 'card']);
-const SUCCESS_VALUES = new Set(['success', 'succeeded', 'paid', 'completed', 'ok', '0']);
+const SUCCESS_VALUES = new Set(['success', 'succeeded', 'paid', 'completed', 'ok', '0', 0]);
 const FAILED_VALUES = new Set(['failed', 'failure', 'declined', 'error']);
-const CANCELLED_VALUES = new Set(['cancelled', 'canceled']);
-const TIMEOUT_VALUES = new Set(['timeout', 'timed_out']);
+const CANCELLED_VALUES = new Set(['cancelled', 'canceled', '1032']);
+const TIMEOUT_VALUES = new Set(['timeout', 'timed_out', '1037']);
 
 const normalizeProvider = (provider) => {
     if (!provider) return null;
@@ -14,8 +14,8 @@ const normalizeProvider = (provider) => {
 };
 
 const mapProviderStatus = (rawStatus) => {
-    const value = String(rawStatus || '').trim().toLowerCase();
-    if (!value) return 'pending';
+    const value = String(rawStatus ?? '').trim().toLowerCase();
+    if (value === '') return 'pending';
     if (SUCCESS_VALUES.has(value)) return 'succeeded';
     if (FAILED_VALUES.has(value)) return 'failed';
     if (CANCELLED_VALUES.has(value)) return 'cancelled';
@@ -36,8 +36,8 @@ const initializePaymentWithProvider = async ({
         throw new Error('Unsupported payment provider.');
     }
 
-    // This is a provider adapter skeleton. It returns mock pending data
-    // until live provider credentials and endpoints are configured.
+    // Note: M-Pesa initialization is handled in the controller via the specialized utility.
+    // This remains as a skeleton for Card/Stripe/etc.
     return {
         status: 'pending',
         providerRequestId: `REQ-${Date.now()}-${crypto.randomInt(100, 1000)}`,
@@ -61,6 +61,33 @@ const parseProviderWebhook = (provider, payload = {}) => {
         throw new Error('Unsupported payment provider.');
     }
 
+    // Specialized parsing for M-Pesa STK Push Callbacks
+    if (normalizedProvider === 'mpesa' && payload.Body?.stkCallback) {
+        const callback = payload.Body.stkCallback;
+        const metadata = {};
+        
+        if (callback.CallbackMetadata?.Item) {
+            callback.CallbackMetadata.Item.forEach(item => {
+                metadata[item.Name] = item.Value;
+            });
+        }
+
+        return {
+            provider: 'mpesa',
+            status: mapProviderStatus(callback.ResultCode),
+            eventId: callback.CheckoutRequestID, // Use CheckoutRequestID as event uniqueness
+            providerTransactionId: metadata.MpesaReceiptNumber || null,
+            providerRequestId: callback.MerchantRequestID || null,
+            providerCheckoutId: callback.CheckoutRequestID || null,
+            providerReference: metadata.MpesaReceiptNumber || null,
+            idempotencyKey: null, // Safaricom doesn't return our custom key
+            failureCode: String(callback.ResultCode),
+            failureReason: callback.ResultDesc || null,
+            rawPayload: payload
+        };
+    }
+
+    // Standard parsing for Card/Other providers
     const status = mapProviderStatus(
         payload.status
         || payload.result

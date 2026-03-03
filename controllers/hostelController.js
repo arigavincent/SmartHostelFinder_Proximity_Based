@@ -39,8 +39,27 @@ const pickAllowedHostelUpdates = (payload, isAdmin) => {
 // Create a new hostel (Owner only)
 exports.createHostel = async (req, res) => {
     try {
+        // Create a copy of the body to manipulate
+        const body = { ...req.body };
+
+        // 1. Properly structure the location object if it's coming from form-data
+        if (body.location && body.location.coordinates) {
+            body.location.type = 'Point';
+            body.location.coordinates = [
+                parseFloat(body.location.coordinates[0]), // Longitude
+                parseFloat(body.location.coordinates[1])  // Latitude
+            ];
+        }
+
+        // 2. Properly structure amenities (optional, but handles strings like "true" from form-data)
+        if (body.amenities) {
+            Object.keys(body.amenities).forEach(key => {
+                body.amenities[key] = body.amenities[key] === 'true';
+            });
+        }
+
         const hostelData = {
-            ...req.body,
+            ...body,
             owner: req.user.id,
             images: req.files ? req.files.map(file => file.path) : []
         };
@@ -48,7 +67,6 @@ exports.createHostel = async (req, res) => {
         const hostel = new Hostel(hostelData);
         const savedHostel = await hostel.save();
         
-        // Add hostel to owner's hostel list
         await Owner.findByIdAndUpdate(req.user.id, {
             $push: { hostels: savedHostel._id }
         });
@@ -58,7 +76,7 @@ exports.createHostel = async (req, res) => {
             hostel: savedHostel
         });
     } catch (error) {
-        res.status(500).json({ message: 'Server error.' });
+        res.status(500).json({ message: 'Server error.', error: error.message });
     }
 };
 
