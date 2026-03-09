@@ -16,14 +16,18 @@ router.get('/stats', adminController.getDashboardStats);
 router.get('/owners', adminController.getAllOwners);
 router.get('/owners/pending', adminController.getPendingOwners);
 router.put('/owners/:ownerId/approve', adminController.approveOwner);
+router.put('/owners/:ownerId/suspend', adminController.suspendOwner);
 router.delete('/owners/:ownerId/reject', adminController.rejectOwner);
 
 // Hostel management
 router.get('/hostels/pending', adminController.getPendingHostels);
 router.put('/hostels/:hostelId/approve', adminController.approveHostel);
+router.put('/hostels/:hostelId/unapprove', adminController.unapproveHostel);
 router.delete('/hostels/:hostelId/reject', adminController.rejectHostel);
 
 // User management
 router.get('/students', adminController.getAllStudents);
+router.delete('/students/:studentId', adminController.deleteStudent);
+router.delete('/owners/:ownerId', adminController.deleteOwner);
 
 module.exports = router;

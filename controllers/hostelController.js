@@ -1,5 +1,32 @@
 const Hostel = require('../models/Hostel');
 const Owner = require('../models/Owners');
+const Booking = require('../models/Booking');
+const cloudinary = require('../config/cloudinary');
+
+// ── Cloudinary helpers ───────────────────────────────────────────────────────
+const uploadToCloudinary = (buffer, folder = 'hostels') =>
+    new Promise((resolve, reject) => {
+        const stream = cloudinary.uploader.upload_stream(
+            { folder, resource_type: 'image' },
+            (err, result) => (err ? reject(err) : resolve(result.secure_url))
+        );
+        stream.end(buffer);
+    });
+
+const deleteFromCloudinary = async (url) => {
+    try {
+        // Extract public_id: everything after /upload/[vXXXX/]{folder}/{name}.ext
+        const parts = url.split('/');
+        const uploadIdx = parts.indexOf('upload');
+        if (uploadIdx === -1) return;
+        // Skip optional version segment (e.g. v1234567)
+        const afterUpload = parts.slice(uploadIdx + 1);
+        const startIdx = /^v\d+$/.test(afterUpload[0]) ? 1 : 0;
+        const publicIdWithExt = afterUpload.slice(startIdx).join('/');
+        const publicId = publicIdWithExt.replace(/\.[^/.]+$/, '');
+        await cloudinary.uploader.destroy(publicId);
+    } catch { /* best-effort – don't fail the request */ }
+};
 
 const OWNER_ALLOWED_HOSTEL_UPDATES = new Set([
     'name',
@@ -39,42 +66,93 @@ const pickAllowedHostelUpdates = (payload, isAdmin) => {
 // Create a new hostel (Owner only)
 exports.createHostel = async (req, res) => {
     try {
-        // Create a copy of the body to manipulate
         const body = { ...req.body };
 
-        // 1. Properly structure the location object if it's coming from form-data
-        if (body.location && body.location.coordinates) {
-            body.location.type = 'Point';
-            body.location.coordinates = [
-                parseFloat(body.location.coordinates[0]), // Longitude
-                parseFloat(body.location.coordinates[1])  // Latitude
-            ];
+        // Parse JSON-stringified nested fields from FormData
+        if (typeof body.location === 'string') {
+            try { body.location = JSON.parse(body.location); } catch { body.location = {}; }
+        }
+        if (typeof body.amenities === 'string') {
+            try { body.amenities = JSON.parse(body.amenities); } catch { body.amenities = {}; }
         }
 
-        // 2. Properly structure amenities (optional, but handles strings like "true" from form-data)
-        if (body.amenities) {
-            Object.keys(body.amenities).forEach(key => {
-                body.amenities[key] = body.amenities[key] === 'true';
-            });
+        // Upload images to Cloudinary
+        const imageUrls = [];
+        if (req.files && req.files.length > 0) {
+            for (const file of req.files) {
+                const url = await uploadToCloudinary(file.buffer, 'hostels');
+                imageUrls.push(url);
+            }
         }
 
         const hostelData = {
             ...body,
             owner: req.user.id,
-            images: req.files ? req.files.map(file => file.path) : []
+            images: imageUrls
         };
-        
+
         const hostel = new Hostel(hostelData);
         const savedHostel = await hostel.save();
-        
+
         await Owner.findByIdAndUpdate(req.user.id, {
             $push: { hostels: savedHostel._id }
         });
-        
+
         res.status(201).json({
             message: 'Hostel created. Pending admin approval.',
             hostel: savedHostel
         });
+    } catch (error) {
+        res.status(500).json({ message: 'Server error.', error: error.message });
+    }
+};
+
+// Upload images to existing hostel (Owner only)
+exports.uploadHostelImages = async (req, res) => {
+    try {
+        const hostel = await Hostel.findById(req.params.id);
+        if (!hostel) return res.status(404).json({ message: 'Hostel not found.' });
+        if (hostel.owner.toString() !== req.user.id) {
+            return res.status(403).json({ message: 'Not authorized.' });
+        }
+        if (!req.files || req.files.length === 0) {
+            return res.status(400).json({ message: 'No images provided.' });
+        }
+
+        const imageUrls = [];
+        for (const file of req.files) {
+            const url = await uploadToCloudinary(file.buffer, 'hostels');
+            imageUrls.push(url);
+        }
+
+        hostel.images.push(...imageUrls);
+        await hostel.save();
+
+        res.status(200).json({ message: 'Images uploaded.', images: hostel.images });
+    } catch (error) {
+        res.status(500).json({ message: 'Server error.', error: error.message });
+    }
+};
+
+// Delete a single image from hostel (Owner/Admin)
+exports.deleteHostelImage = async (req, res) => {
+    try {
+        const { url } = req.query;
+        if (!url) return res.status(400).json({ message: 'Image URL required as query param ?url=...' });
+
+        const hostel = await Hostel.findById(req.params.id);
+        if (!hostel) return res.status(404).json({ message: 'Hostel not found.' });
+        if (hostel.owner.toString() !== req.user.id && req.user.role !== 'admin') {
+            return res.status(403).json({ message: 'Not authorized.' });
+        }
+
+        hostel.images = hostel.images.filter(img => img !== url);
+        await hostel.save();
+
+        // Remove from Cloudinary (best-effort)
+        await deleteFromCloudinary(url);
+
+        res.status(200).json({ message: 'Image deleted.', images: hostel.images });
     } catch (error) {
         res.status(500).json({ message: 'Server error.', error: error.message });
     }
@@ -276,17 +354,28 @@ exports.addRating = async (req, res) => {
     try {
         const { rating, review } = req.body;
         const hostelId = req.params.id;
-        
-        if (rating < 1 || rating > 5) {
+
+        if (!rating || rating < 1 || rating > 5) {
             return res.status(400).json({ message: 'Rating must be between 1 and 5.' });
         }
-        
+
+        // Verify student has a confirmed booking for this hostel
+        const confirmedBooking = await Booking.findOne({
+            student: req.user.id,
+            hostel: hostelId,
+            status: 'confirmed',
+        });
+        if (!confirmedBooking) {
+            return res.status(403).json({
+                message: 'You can only rate a hostel after a confirmed booking.',
+            });
+        }
+
         const hostel = await Hostel.findById(hostelId);
-        
         if (!hostel) {
             return res.status(404).json({ message: 'Hostel not found.' });
         }
-        
+
         // Check if student already rated
         const existingRating = hostel.ratings.find(
             r => r.student.toString() === req.user.id

@@ -1,11 +1,11 @@
 const router = require('express').Router();
 const authController = require('../controllers/authController');
 const { verifyToken } = require('../middlewares/auth');
-const upload = require('../utils/multer');
+const { uploadLicense } = require('../utils/multer');
 
 // Registration
 router.post('/register/student', authController.registerStudent);
-router.post('/register/owner', upload.single('license'), authController.registerOwner);
+router.post('/register/owner', uploadLicense.single('license'), authController.registerOwner);
 
 // Login
 router.post('/login', authController.login);

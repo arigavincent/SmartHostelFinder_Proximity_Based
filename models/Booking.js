@@ -5,6 +5,8 @@ const BookingSchema = new mongoose.Schema({
     student: { type: mongoose.Schema.Types.ObjectId, ref: 'Student', required: true },
     owner: { type: mongoose.Schema.Types.ObjectId, ref: 'Owner', required: true },
     roomsBooked: { type: Number, required: true, min: 1, default: 1 },
+    startDate: { type: Date, required: true },
+    endDate: { type: Date, required: true },
     amount: { type: Number, required: true, min: 0 },
     currency: { type: String, default: 'KES' },
     status: { 
@@ -16,7 +18,8 @@ const BookingSchema = new mongoose.Schema({
         method: { type: String, enum: ['mpesa', 'card'], required: true },
         status: { type: String, enum: ['pending', 'paid', 'failed'], default: 'pending' },
         reference: { type: String },
-        paidAt: { type: Date }
+        paidAt: { type: Date },
+        checkoutRequestID: { type: String },
     },
     receipt: {
         receiptNumber: { type: String },

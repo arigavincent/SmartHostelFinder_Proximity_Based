@@ -1,5 +1,16 @@
 const jwt = require('jsonwebtoken');
 const { OAuth2Client } = require('google-auth-library');
+const cloudinary = require('../config/cloudinary');
+
+// Upload a buffer to Cloudinary (resource_type 'auto' handles PDF + images)
+const uploadLicenseToCloudinary = (buffer, folder = 'licenses') =>
+    new Promise((resolve, reject) => {
+        const stream = cloudinary.uploader.upload_stream(
+            { folder, resource_type: 'auto' },
+            (err, result) => (err ? reject(err) : resolve(result.secure_url))
+        );
+        stream.end(buffer);
+    });
 const { hashPassword, comparePassword } = require('../helpers/passwordHelper');
 const { generateToken: generateRandomToken, hashToken } = require('../helpers/tokenHelper');
 const { sendVerificationEmail, sendPasswordResetEmail } = require('../helpers/emailHelper');
@@ -20,11 +31,9 @@ const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 // Generate JWT Token
 const generateToken = (user) => {
     const expiresIn = process.env.JWT_EXPIRES_IN || '30d';
-    return jwt.sign(
-        { id: user._id, email: user.email, role: user.role },
-        process.env.JWT_SECRET,
-        { expiresIn }
-    );
+    const payload = { id: user._id, email: user.email, role: user.role };
+    if (user.role === 'owner') payload.isApproved = user.isApproved ?? false;
+    return jwt.sign(payload, process.env.JWT_SECRET, { expiresIn });
 };
 
 // Student Registration
@@ -88,7 +97,16 @@ exports.registerStudent = async (req, res) => {
 exports.registerOwner = async (req, res) => {
     try {
         const { username, email, password } = req.body;
-        const businessLicense = req.file ? req.file.path : null;
+
+        // Upload license to Cloudinary if provided
+        let businessLicense = null;
+        if (req.file) {
+            try {
+                businessLicense = await uploadLicenseToCloudinary(req.file.buffer);
+            } catch (uploadErr) {
+                return res.status(500).json({ message: 'Failed to upload business license. Please try again.' });
+            }
+        }
         
         // Validate input fields (including license check)
         const validation = validateOwnerRegistration({ username, email, password }, !!req.file);
@@ -184,11 +202,6 @@ exports.login = async (req, res) => {
             });
         }
         
-        // Check if owner is approved
-        if (user.role === 'owner' && !user.isApproved) {
-            return res.status(403).json({ message: 'Account pending admin approval.' });
-        }
-        
         // Verify password
         const validPassword = await comparePassword(password, user.password);
         if (!validPassword) {
@@ -201,7 +214,13 @@ exports.login = async (req, res) => {
         res.status(200).json({
             message: 'Login successful.',
             token,
-            user: { id: user._id, username: user.username, email: user.email, role: user.role }
+            user: {
+                id: user._id,
+                username: user.username,
+                email: user.email,
+                role: user.role,
+                ...(user.role === 'owner' && { isApproved: user.isApproved ?? false })
+            }
         });
     } catch (error) {
         res.status(500).json({ message: 'Server error.' });
@@ -463,21 +482,19 @@ exports.googleLogin = async (req, res) => {
             await user.save();
         }
         
-        // Check owner approval
-        if (user.role === 'owner' && !user.isApproved) {
-            return res.status(403).json({ 
-                message: 'Account pending admin approval.',
-                user: { id: user._id, email: user.email }
-            });
-        }
-        
         // Generate JWT
         const jwtToken = generateToken(user);
         
         res.status(200).json({
             message: 'Google login successful.',
             token: jwtToken,
-            user: { id: user._id, username: user.username, email: user.email, role: user.role }
+            user: {
+                id: user._id,
+                username: user.username,
+                email: user.email,
+                role: user.role,
+                ...(user.role === 'owner' && { isApproved: user.isApproved ?? false })
+            }
         });
     } catch (error) {
         res.status(500).json({ message: 'Google authentication failed.' });

@@ -1,10 +1,14 @@
 const mongoose = require('mongoose');
+const dns = require('dns');
 const dotenv = require('dotenv');
 const Admin = require('../models/Admin');
 const { hashPassword } = require('../helpers/passwordHelper');
 
 // Load environment variables
 dotenv.config();
+
+// Fix Node.js SRV resolution on Windows
+dns.setServers(['8.8.8.8', '8.8.4.4', '1.1.1.1']);
 
 // Default admin credentials (change these in production)
 const DEFAULT_ADMIN = {

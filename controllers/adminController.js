@@ -4,6 +4,7 @@ const Student = require('../models/Students');
 const Hostel = require('../models/Hostel');
 const { hashPassword } = require('../helpers/passwordHelper');
 const { validateAdminCreation } = require('../helpers/validationHelper');
+const { sendApprovalEmail, sendSuspensionEmail } = require('../helpers/emailHelper');
 
 // Get all pending owner approvals
 exports.getPendingOwners = async (req, res) => {
@@ -32,6 +33,11 @@ exports.approveOwner = async (req, res) => {
         if (!owner) {
             return res.status(404).json({ message: 'Owner not found.' });
         }
+
+        // Notify owner via email (non-blocking)
+        sendApprovalEmail(owner.email, owner.username, true).catch(err =>
+            console.error('Approval email failed:', err.message)
+        );
         
         res.status(200).json({
             message: 'Owner approved successfully.',
@@ -50,8 +56,40 @@ exports.rejectOwner = async (req, res) => {
         if (!owner) {
             return res.status(404).json({ message: 'Owner not found.' });
         }
+
+        // Notify owner via email (non-blocking)
+        sendApprovalEmail(owner.email, owner.username, false).catch(err =>
+            console.error('Rejection email failed:', err.message)
+        );
         
         res.status(200).json({ message: 'Owner rejected and removed.' });
+    } catch (error) {
+        res.status(500).json({ message: 'Server error.' });
+    }
+};
+
+// Suspend owner (revoke approval without deleting)
+exports.suspendOwner = async (req, res) => {
+    try {
+        const owner = await Owner.findByIdAndUpdate(
+            req.params.ownerId,
+            { $set: { isApproved: false } },
+            { new: true }
+        ).select('-password');
+
+        if (!owner) {
+            return res.status(404).json({ message: 'Owner not found.' });
+        }
+
+        // Notify owner via email (non-blocking)
+        sendSuspensionEmail(owner.email, owner.username).catch(err =>
+            console.error('Suspension email failed:', err.message)
+        );
+
+        res.status(200).json({
+            message: 'Owner suspended successfully.',
+            owner
+        });
     } catch (error) {
         res.status(500).json({ message: 'Server error.' });
     }
@@ -94,6 +132,28 @@ exports.approveHostel = async (req, res) => {
     }
 };
 
+// Un-approve hostel (revoke approval without deleting)
+exports.unapproveHostel = async (req, res) => {
+    try {
+        const hostel = await Hostel.findByIdAndUpdate(
+            req.params.hostelId,
+            { $set: { isApproved: false } },
+            { new: true }
+        ).populate('owner', 'username email');
+
+        if (!hostel) {
+            return res.status(404).json({ message: 'Hostel not found.' });
+        }
+
+        res.status(200).json({
+            message: 'Hostel approval revoked. It is now pending review.',
+            hostel
+        });
+    } catch (error) {
+        res.status(500).json({ message: 'Server error.' });
+    }
+};
+
 // Reject hostel
 exports.rejectHostel = async (req, res) => {
     try {
@@ -128,6 +188,38 @@ exports.getDashboardStats = async (req, res) => {
         };
         
         res.status(200).json(stats);
+    } catch (error) {
+        res.status(500).json({ message: 'Server error.' });
+    }
+};
+
+// Delete a student account
+exports.deleteStudent = async (req, res) => {
+    try {
+        const student = await Student.findByIdAndDelete(req.params.studentId);
+        if (!student) {
+            return res.status(404).json({ message: 'Student not found.' });
+        }
+        res.status(200).json({ message: 'Student account deleted successfully.' });
+    } catch (error) {
+        res.status(500).json({ message: 'Server error.' });
+    }
+};
+
+// Delete an owner account (+ all their hostels)
+exports.deleteOwner = async (req, res) => {
+    try {
+        const owner = await Owner.findById(req.params.ownerId);
+        if (!owner) {
+            return res.status(404).json({ message: 'Owner not found.' });
+        }
+
+        // Delete all hostels belonging to this owner
+        await Hostel.deleteMany({ owner: owner._id });
+
+        await Owner.findByIdAndDelete(owner._id);
+
+        res.status(200).json({ message: 'Owner and all associated hostels deleted successfully.' });
     } catch (error) {
         res.status(500).json({ message: 'Server error.' });
     }
