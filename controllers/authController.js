@@ -2,11 +2,13 @@ const jwt = require('jsonwebtoken');
 const { OAuth2Client } = require('google-auth-library');
 const cloudinary = require('../config/cloudinary');
 
-// Upload a buffer to Cloudinary (resource_type 'auto' handles PDF + images)
-const uploadLicenseToCloudinary = (buffer, folder = 'licenses') =>
+// Upload a buffer to Cloudinary
+// PDFs must use resource_type 'raw' so they are served directly without auth
+const uploadLicenseToCloudinary = (buffer, folder = 'licenses', mimetype = '') =>
     new Promise((resolve, reject) => {
+        const isPdf = mimetype === 'application/pdf';
         const stream = cloudinary.uploader.upload_stream(
-            { folder, resource_type: 'auto' },
+            { folder, resource_type: isPdf ? 'raw' : 'image' },
             (err, result) => (err ? reject(err) : resolve(result.secure_url))
         );
         stream.end(buffer);
@@ -102,7 +104,7 @@ exports.registerOwner = async (req, res) => {
         let businessLicense = null;
         if (req.file) {
             try {
-                businessLicense = await uploadLicenseToCloudinary(req.file.buffer);
+                businessLicense = await uploadLicenseToCloudinary(req.file.buffer, 'licenses', req.file.mimetype);
             } catch (uploadErr) {
                 return res.status(500).json({ message: 'Failed to upload business license. Please try again.' });
             }
