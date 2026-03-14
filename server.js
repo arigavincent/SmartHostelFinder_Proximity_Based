@@ -3,6 +3,8 @@ const cors = require('cors');
 const dotenv = require('dotenv');
 const path = require('path');
 const connectDB = require('./config/db');
+const cron = require('node-cron');
+const axios = require('axios');
 
 // Load environment variables
 dotenv.config();
@@ -78,6 +80,18 @@ const startServer = async () => {
         app.listen(PORT, () => {
             console.log(`\n🚀 Server running on port ${PORT}`);
             console.log(`📡 API available at http://localhost:${PORT}`);
+
+            // Cron job to keep Render instance awake
+            const SERVER_URL = process.env.SERVER_URL || `http://localhost:${PORT}`;
+            
+            cron.schedule('*/3 * * * *', async () => {
+                try {
+                    const response = await axios.get(`${SERVER_URL}/api/health`);
+                    console.log(`[Cron] Keep-alive ping successful: ${response.data.status}`);
+                } catch (error) {
+                    console.error('[Cron] Keep-alive ping failed:', error.message);
+                }
+            });
         });
     } catch (error) {
         console.error('Failed to start server:', error);
