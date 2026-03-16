@@ -5,6 +5,7 @@ const StudentSchema = new mongoose.Schema({
     email: { type: String, required: true, unique: true },
     password: { type: String },
     role: { type: String, default: 'student' },
+    phone: { type: String, trim: true },
     favorites: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Hostel' }],
     
     // Email verification

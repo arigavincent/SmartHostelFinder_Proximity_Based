@@ -1,0 +1,8 @@
+node_modules
+npm-debug.log
+storage
+storage-test
+uploads
+.env
+coverage
+tests

@@ -42,3 +42,24 @@ test('verifyWebhookSignature rejects invalid signature', () => {
 
     assert.equal(ok, false);
 });
+
+test('verifyWebhookSignature accepts mpesa token from query string', () => {
+    const ok = verifyWebhookSignature({
+        provider: 'mpesa',
+        query: { token: 'mpesa-secret' },
+        payload: { Body: { stkCallback: {} } },
+        secret: 'mpesa-secret'
+    });
+
+    assert.equal(ok, true);
+});
+
+test('verifyWebhookSignature rejects mpesa webhook without token', () => {
+    const ok = verifyWebhookSignature({
+        provider: 'mpesa',
+        payload: { Body: { stkCallback: {} } },
+        secret: 'mpesa-secret'
+    });
+
+    assert.equal(ok, false);
+});

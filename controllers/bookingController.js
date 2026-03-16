@@ -2,8 +2,8 @@ const mongoose = require('mongoose');
 const PDFDocument = require('pdfkit');
 const Booking = require('../models/Booking');
 const Hostel = require('../models/Hostel');
+const PaymentTransaction = require('../models/PaymentTransaction');
 const { initiateSTKPush, querySTKStatus } = require('../utils/mpesa');
-const { sendBookingConfirmationEmail } = require('../helpers/emailHelper');
 
 const normalizePaymentMethod = (method) => {
     if (!method) return null;
@@ -36,6 +36,106 @@ const normalizeObjectId = (value) => {
     return mongoose.Types.ObjectId.isValid(raw) ? raw : null;
 };
 
+const calculateBillingMonths = (startDate, endDate) => {
+    const years = endDate.getFullYear() - startDate.getFullYear();
+    const months = endDate.getMonth() - startDate.getMonth();
+    let totalMonths = (years * 12) + months;
+
+    if (totalMonths <= 0) {
+        totalMonths = 1;
+    }
+
+    const normalizedEnd = new Date(startDate);
+    normalizedEnd.setMonth(normalizedEnd.getMonth() + totalMonths);
+
+    if (normalizedEnd < endDate) {
+        totalMonths += 1;
+    }
+
+    return Math.max(1, totalMonths);
+};
+
+const generateReceiptNumber = () => {
+    return `RCP-${Date.now()}-${String(Math.floor(Math.random() * 1000)).padStart(3, '0')}`;
+};
+
+const buildMpesaCallbackUrl = () => {
+    const serverUrl = String(process.env.SERVER_URL || '').trim();
+    if (!serverUrl) {
+        throw new Error('SERVER_URL environment variable is required for M-Pesa callback URL.');
+    }
+
+    const webhookToken = String(
+        process.env.MPESA_WEBHOOK_TOKEN
+        || process.env.PAYMENT_WEBHOOK_SECRET
+        || ''
+    ).trim();
+    if (!webhookToken) {
+        throw new Error('MPESA_WEBHOOK_TOKEN (or PAYMENT_WEBHOOK_SECRET) is required for M-Pesa webhook verification.');
+    }
+
+    const callbackUrl = new URL('/api/payments/webhook/mpesa', serverUrl);
+    callbackUrl.searchParams.set('token', webhookToken);
+    return callbackUrl.toString();
+};
+
+const populateBookingQuery = (query) => query
+    .populate('hostel', 'name location pricePerMonth images')
+    .populate('owner', 'username email')
+    .populate('student', 'username email');
+
+const releaseReservedRooms = async (booking) => {
+    await Hostel.findByIdAndUpdate(booking.hostel, {
+        $inc: { availableRooms: booking.roomsBooked }
+    });
+};
+
+const finalizePaidBooking = async (booking, reference) => {
+    booking.payment.status = 'paid';
+    booking.payment.reference = reference || booking.payment.reference || `PAY-${Date.now()}`;
+    booking.payment.paidAt = new Date();
+    booking.status = 'confirmed';
+
+    if (!booking.receipt?.receiptNumber) {
+        booking.receipt = {
+            receiptNumber: generateReceiptNumber(),
+            issuedAt: new Date()
+        };
+    }
+
+    await booking.save();
+    return booking;
+};
+
+const markBookingPaymentFailed = async (booking) => {
+    const shouldReleaseRooms = booking.status !== 'cancelled' && booking.status !== 'confirmed';
+    booking.payment.status = 'failed';
+    if (shouldReleaseRooms) {
+        booking.status = 'cancelled';
+    }
+    await booking.save();
+
+    if (shouldReleaseRooms) {
+        await releaseReservedRooms(booking);
+    }
+
+    return booking;
+};
+
+const withLegacyDates = (booking) => {
+    if (!booking) return booking;
+
+    const createdAt = booking.createdAt ? new Date(booking.createdAt) : new Date();
+    if (!booking.startDate) {
+        booking.startDate = createdAt;
+    }
+    if (!booking.endDate) {
+        booking.endDate = new Date(createdAt.getTime() + (1000 * 60 * 60 * 24 * 30));
+    }
+
+    return booking;
+};
+
 // Create booking (Student)
 exports.createBooking = async (req, res) => {
     try {
@@ -43,25 +143,6 @@ exports.createBooking = async (req, res) => {
         
         if (!hostelId) {
             return res.status(400).json({ message: 'Hostel ID is required.' });
-        }
-
-        // Validate dates
-        if (!startDate || !endDate) {
-            return res.status(400).json({ message: 'Start date and end date are required.' });
-        }
-        const start = new Date(startDate);
-        const end = new Date(endDate);
-        if (isNaN(start.getTime()) || isNaN(end.getTime())) {
-            return res.status(400).json({ message: 'Invalid date format provided.' });
-        }
-        if (start >= end) {
-            return res.status(400).json({ message: 'End date must be after start date.' });
-        }
-        // Allow today or future dates only
-        const today = new Date();
-        today.setHours(0, 0, 0, 0);
-        if (start < today) {
-            return res.status(400).json({ message: 'Start date cannot be in the past.' });
         }
         
         const roomsBooked = parseInt(rooms, 10);
@@ -72,6 +153,16 @@ exports.createBooking = async (req, res) => {
         const method = normalizePaymentMethod(paymentMethod);
         if (!method) {
             return res.status(400).json({ message: 'Payment method must be mpesa or card.' });
+        }
+
+        const checkIn = new Date(startDate);
+        const checkOut = new Date(endDate);
+        if (Number.isNaN(checkIn.getTime()) || Number.isNaN(checkOut.getTime())) {
+            return res.status(400).json({ message: 'Valid startDate and endDate are required.' });
+        }
+
+        if (checkOut <= checkIn) {
+            return res.status(400).json({ message: 'End date must be after start date.' });
         }
         
         // Reserve rooms (prevent overbooking)
@@ -100,19 +191,16 @@ exports.createBooking = async (req, res) => {
             return res.status(400).json({ message: 'Hostel pricing is invalid. Please contact support.' });
         }
 
-        // Calculate amount based on duration
-        // 1 month = 30 days; round up to nearest month
-        const diffMs = end.getTime() - start.getTime();
-        const months = Math.ceil(diffMs / (1000 * 60 * 60 * 24 * 30));
-        const bookingAmount = monthlyPrice * roomsBooked * months;
+        const billingMonths = calculateBillingMonths(checkIn, checkOut);
+        const bookingAmount = monthlyPrice * roomsBooked * billingMonths;
         
         const booking = new Booking({
             hostel: hostel._id,
             student: req.user.id,
             owner: hostel.owner,
             roomsBooked,
-            startDate: start,
-            endDate: end,
+            startDate: checkIn,
+            endDate: checkOut,
             amount: bookingAmount,
             currency: 'KES',
             payment: {
@@ -140,112 +228,124 @@ exports.createBooking = async (req, res) => {
     }
 };
 
-// Helper: confirm a booking and send confirmation email
-async function confirmAndNotify(booking) {
-    const receiptNumber = `RCP-${Date.now()}-${String(Math.floor(Math.random() * 1000)).padStart(3, '0')}`;
-    booking.payment.status = 'paid';
-    booking.payment.paidAt = new Date();
-    booking.status = 'confirmed';
-    booking.receipt = { receiptNumber, issuedAt: new Date() };
-    await booking.save();
-
-    // Send confirmation email (non-blocking)
+// Get a single booking (Student/Owner/Admin)
+exports.getBookingById = async (req, res) => {
     try {
-        const populatedBooking = await Booking.findById(booking._id)
-            .populate('hostel', 'name location')
-            .populate('student', 'username email');
-        if (populatedBooking?.student?.email) {
-            sendBookingConfirmationEmail(
-                populatedBooking.student.email,
-                populatedBooking.student.username,
-                {
-                    hostelName: populatedBooking.hostel?.name || 'N/A',
-                    hostelAddress: populatedBooking.hostel?.location?.address || populatedBooking.hostel?.location?.city || '',
-                    startDate: populatedBooking.startDate,
-                    endDate: populatedBooking.endDate,
-                    roomsBooked: populatedBooking.roomsBooked,
-                    amount: populatedBooking.amount,
-                    currency: populatedBooking.currency,
-                    paymentMethod: populatedBooking.payment.method,
-                    paymentReference: populatedBooking.payment.reference || '',
-                    receiptNumber,
-                }
-            ).catch((e) => console.error('Confirmation email error:', e.message));
-        }
-    } catch (e) {
-        console.error('Email send error:', e.message);
-    }
+        const booking = await populateBookingQuery(Booking.findById(req.params.id));
 
-    return booking;
-}
-
-// Confirm payment - Student
-exports.confirmPayment = async (req, res) => {
-    try {
-        const { phone, paymentReference } = req.body;
-
-        const booking = await Booking.findById(req.params.id);
         if (!booking) {
             return res.status(404).json({ message: 'Booking not found.' });
         }
 
-        if (booking.student.toString() !== req.user.id) {
-            return res.status(403).json({ message: 'Not authorized to confirm this booking.' });
+        const isStudent = booking.student && booking.student._id.toString() === req.user.id;
+        const isOwner = booking.owner && booking.owner._id.toString() === req.user.id;
+        const isAdmin = req.user.role === 'admin';
+
+        if (!isStudent && !isOwner && !isAdmin) {
+            return res.status(403).json({ message: 'Not authorized to view this booking.' });
         }
 
-        if (booking.status === 'cancelled') {
-            return res.status(400).json({ message: 'Cancelled bookings cannot be confirmed.' });
-        }
-
-        if (booking.payment.status === 'paid' && booking.status === 'confirmed') {
-            return res.status(200).json({ message: 'Payment already confirmed.', booking });
-        }
-
-        // M-Pesa: initiate STK push
-        if (booking.payment.method === 'mpesa') {
-            if (!phone) {
-                return res.status(400).json({ message: 'Phone number is required for M-Pesa payment.' });
-            }
-            const callbackUrl = `${process.env.SERVER_URL}/api/payments/mpesa/callback`;
-            const stkResult = await initiateSTKPush(
-                phone,
-                booking.amount,
-                String(booking._id).slice(-12),
-                callbackUrl
-            );
-
-            if (!stkResult.success) {
-                return res.status(502).json({
-                    message: stkResult.error || 'Failed to initiate M-Pesa payment. Please try again.',
-                });
-            }
-
-            // Store checkoutRequestID for status polling
-            booking.payment.checkoutRequestID = stkResult.checkoutRequestID;
-            await booking.save();
-
-            return res.status(200).json({
-                stkPending: true,
-                checkoutRequestID: stkResult.checkoutRequestID,
-                message: stkResult.customerMessage || 'Please check your phone for the M-Pesa prompt and enter your PIN.',
-            });
-        }
-
-        // Card: confirm immediately (mock/placeholder)
-        booking.payment.reference = paymentReference || `CARD-${Date.now()}`;
-        const confirmed = await confirmAndNotify(booking);
-
-        res.status(200).json({
-            message: 'Payment confirmed.',
-            booking: confirmed,
-        });
+        res.status(200).json(withLegacyDates(booking));
     } catch (error) {
-        console.error('confirmPayment error:', error);
         res.status(500).json({ message: 'Server error.' });
     }
 };
 
-// Verify M-Pesa STK status (polling endpoint) - Student
+// Confirm payment - Student compatibility endpoint
+exports.confirmPayment = async (req, res) => {
+    try {
+        const { paymentReference, phone, phoneNumber } = req.body;
+        
+        const booking = await Booking.findById(req.params.id);
+        if (!booking) {
+            return res.status(404).json({ message: 'Booking not found.' });
+        }
+        
+        if (booking.student.toString() !== req.user.id) {
+            return res.status(403).json({ message: 'Not authorized to confirm this booking.' });
+        }
+        
+        if (booking.status === 'cancelled') {
+            return res.status(400).json({ message: 'Cancelled bookings cannot be confirmed.' });
+        }
+        
+        if (booking.payment.status === 'paid' && booking.status === 'confirmed') {
+            return res.status(200).json({ confirmed: true, message: 'Payment already confirmed.', booking: withLegacyDates(booking) });
+        }
+
+        if (booking.payment.method === 'card') {
+            await finalizePaidBooking(booking, paymentReference || `CARD-${Date.now()}`);
+            return res.status(200).json({
+                confirmed: true,
+                message: 'Card payment confirmed.',
+                booking: withLegacyDates(booking)
+            });
+        }
+
+        const suppliedPhone = String(phoneNumber || phone || '').trim();
+        if (!suppliedPhone) {
+            return res.status(400).json({ message: 'Phone number is required for M-Pesa payments.' });
+        }
+
+        const latestTransaction = await PaymentTransaction.findOne({ booking: booking._id })
+            .sort({ createdAt: -1 });
+
+        if (latestTransaction && ['initiated', 'pending'].includes(latestTransaction.status)) {
+            return res.status(200).json({
+                stkPending: true,
+                message: 'M-Pesa prompt already sent. Complete payment on your phone.'
+            });
+        }
+
+        const callbackUrl = buildMpesaCallbackUrl();
+        const stkResult = await initiateSTKPush(
+            suppliedPhone,
+            booking.amount,
+            `Booking Ref: ${booking._id}`,
+            callbackUrl
+        );
+
+        if (!stkResult.success) {
+            await PaymentTransaction.create({
+                booking: booking._id,
+                student: booking.student,
+                owner: booking.owner,
+                provider: 'mpesa',
+                amount: booking.amount,
+                currency: booking.currency || 'KES',
+                status: 'failed',
+                idempotencyKey: `compat-failed-${Date.now()}-${booking._id}`,
+                failureReason: stkResult.error,
+                rawInitResponse: stkResult
+            });
+
+            return res.status(502).json({ message: stkResult.error || 'Failed to initialize M-Pesa payment.' });
+        }
+
+        await PaymentTransaction.create({
+            booking: booking._id,
+            student: booking.student,
+            owner: booking.owner,
+            provider: 'mpesa',
+            amount: booking.amount,
+            currency: booking.currency || 'KES',
+            status: 'pending',
+            idempotencyKey: `compat-${Date.now()}-${booking._id}`,
+            providerRequestId: stkResult.merchantRequestID,
+            providerCheckoutId: stkResult.checkoutRequestID,
+            rawInitResponse: stkResult
+        });
+
+        res.status(200).json({
+            stkPending: true,
+            message: stkResult.customerMessage || 'Check your phone for the M-Pesa prompt.'
+        });
+    } catch (error) {
+        res.status(500).json({ message: error.message || 'Server error.' });
+    }
+};
+
+// Verify M-Pesa payment polling compatibility endpoint
 exports.verifyMpesaPayment = async (req, res) => {
     try {
         const booking = await Booking.findById(req.params.id);
@@ -254,54 +354,86 @@ exports.verifyMpesaPayment = async (req, res) => {
         }
 
         if (booking.student.toString() !== req.user.id) {
-            return res.status(403).json({ message: 'Not authorized.' });
+            return res.status(403).json({ message: 'Not authorized to verify this booking payment.' });
         }
 
         if (booking.payment.status === 'paid' && booking.status === 'confirmed') {
-            return res.status(200).json({ confirmed: true, booking });
+            return res.status(200).json({ confirmed: true, booking: withLegacyDates(booking) });
         }
 
-        const checkoutRequestID = booking.payment.checkoutRequestID;
-        if (!checkoutRequestID) {
-            return res.status(400).json({ message: 'No pending M-Pesa transaction for this booking.' });
+        const latestTransaction = await PaymentTransaction.findOne({
+            booking: booking._id,
+            provider: 'mpesa'
+        }).sort({ createdAt: -1 });
+
+        if (!latestTransaction) {
+            return res.status(404).json({ failed: true, message: 'No M-Pesa payment transaction found for this booking.' });
         }
 
-        const statusResult = await querySTKStatus(checkoutRequestID);
+        if (latestTransaction.status === 'succeeded') {
+            await finalizePaidBooking(
+                booking,
+                latestTransaction.providerReference
+                || latestTransaction.providerTransactionId
+                || latestTransaction.providerRequestId
+            );
 
-        if (!statusResult.success) {
-            // Could be still processing — treat as pending
+            return res.status(200).json({ confirmed: true, booking: withLegacyDates(booking) });
+        }
+
+        if (['failed', 'cancelled', 'timeout'].includes(latestTransaction.status)) {
+            await markBookingPaymentFailed(booking);
+            return res.status(200).json({
+                failed: true,
+                message: latestTransaction.failureReason || 'Payment was not completed.'
+            });
+        }
+
+        if (!latestTransaction.providerCheckoutId) {
+            return res.status(200).json({ pending: true, message: 'Payment is still pending.' });
+        }
+
+        const stkStatus = await querySTKStatus(latestTransaction.providerCheckoutId);
+        if (!stkStatus.success) {
             return res.status(200).json({ pending: true, message: 'Still waiting for payment confirmation.' });
         }
 
-        const resultCode = String(statusResult.resultCode);
+        if (stkStatus.resultCode === '0') {
+            latestTransaction.status = 'succeeded';
+            latestTransaction.providerReference = latestTransaction.providerReference || latestTransaction.providerTransactionId;
+            latestTransaction.rawCallback = stkStatus;
+            await latestTransaction.save();
 
-        if (resultCode === '0') {
-            // Payment successful
-            const mpesaRef = `MPESA-${checkoutRequestID.slice(-8)}`;
-            booking.payment.reference = mpesaRef;
-            const confirmed = await confirmAndNotify(booking);
-            return res.status(200).json({ confirmed: true, booking: confirmed });
+            await finalizePaidBooking(
+                booking,
+                latestTransaction.providerReference
+                || latestTransaction.providerTransactionId
+                || latestTransaction.providerRequestId
+            );
+
+            return res.status(200).json({ confirmed: true, booking });
         }
 
-        if (resultCode === '1032') {
-            // User cancelled
-            booking.payment.status = 'failed';
-            await booking.save();
-            return res.status(200).json({ failed: true, message: 'Payment was cancelled. Please try again.' });
+        if (['1032', '1037', '1', '2001'].includes(String(stkStatus.resultCode))) {
+            latestTransaction.status = ['1037'].includes(String(stkStatus.resultCode)) ? 'timeout' : 'failed';
+            latestTransaction.failureCode = String(stkStatus.resultCode);
+            latestTransaction.failureReason = stkStatus.resultDesc;
+            latestTransaction.rawCallback = stkStatus;
+            await latestTransaction.save();
+            await markBookingPaymentFailed(booking);
+
+            return res.status(200).json({
+                failed: true,
+                message: stkStatus.resultDesc || 'Payment failed.'
+            });
         }
 
-        if (resultCode === '1037') {
-            // Request timed out on M-Pesa side
-            booking.payment.status = 'failed';
-            await booking.save();
-            return res.status(200).json({ failed: true, message: 'M-Pesa request timed out. Please try again.' });
-        }
-
-        // Other non-zero codes = still pending or unknown
-        return res.status(200).json({ pending: true, message: statusResult.resultDesc || 'Payment still processing.' });
+        return res.status(200).json({
+            pending: true,
+            message: stkStatus.resultDesc || 'Payment is still pending.'
+        });
     } catch (error) {
-        console.error('verifyMpesaPayment error:', error);
-        res.status(500).json({ message: 'Server error.' });
+        res.status(500).json({ message: error.message || 'Server error.' });
     }
 };
 
@@ -325,11 +457,59 @@ exports.cancelBooking = async (req, res) => {
         await booking.save();
         
         // Release rooms
-        await Hostel.findByIdAndUpdate(booking.hostel, {
-            $inc: { availableRooms: booking.roomsBooked }
-        });
+        await releaseReservedRooms(booking);
         
         res.status(200).json({ message: 'Booking cancelled successfully.' });
+    } catch (error) {
+        res.status(500).json({ message: 'Server error.' });
+    }
+};
+
+// Owner: release unpaid reservation and free rooms
+exports.releasePendingBookingByOwner = async (req, res) => {
+    try {
+        const booking = await Booking.findById(req.params.id)
+            .populate('hostel', 'name');
+
+        if (!booking) {
+            return res.status(404).json({ message: 'Booking not found.' });
+        }
+
+        if (booking.owner.toString() !== req.user.id) {
+            return res.status(403).json({ message: 'Not authorized to release this booking.' });
+        }
+
+        if (booking.status === 'confirmed' || booking.payment?.status === 'paid') {
+            return res.status(400).json({ message: 'Paid or confirmed bookings cannot be released by the owner.' });
+        }
+
+        if (booking.status === 'cancelled') {
+            return res.status(400).json({ message: 'Booking is already cancelled.' });
+        }
+
+        booking.status = 'cancelled';
+        booking.payment.status = 'failed';
+        await booking.save();
+
+        await PaymentTransaction.updateMany(
+            {
+                booking: booking._id,
+                status: { $in: ['initiated', 'pending'] }
+            },
+            {
+                $set: {
+                    status: 'cancelled',
+                    failureReason: 'Booking released by hostel owner.'
+                }
+            }
+        );
+
+        await releaseReservedRooms(booking);
+
+        res.status(200).json({
+            message: `Booking released and ${booking.roomsBooked} room${booking.roomsBooked > 1 ? 's were' : ' was'} returned to availability.`,
+            booking: withLegacyDates(booking)
+        });
     } catch (error) {
         res.status(500).json({ message: 'Server error.' });
     }
@@ -342,7 +522,7 @@ exports.listMyBookings = async (req, res) => {
             .populate('hostel', 'name location pricePerMonth images')
             .sort({ createdAt: -1 });
         
-        res.status(200).json(bookings);
+        res.status(200).json(bookings.map(withLegacyDates));
     } catch (error) {
         res.status(500).json({ message: 'Server error.' });
     }
@@ -352,11 +532,11 @@ exports.listMyBookings = async (req, res) => {
 exports.listOwnerBookings = async (req, res) => {
     try {
         const bookings = await Booking.find({ owner: req.user.id })
-            .populate('hostel', 'name location pricePerMonth')
+            .populate('hostel', 'name location pricePerMonth images')
             .populate('student', 'username email')
             .sort({ createdAt: -1 });
         
-        res.status(200).json(bookings);
+        res.status(200).json(bookings.map(withLegacyDates));
     } catch (error) {
         res.status(500).json({ message: 'Server error.' });
     }
@@ -408,37 +588,11 @@ exports.listAdminBookings = async (req, res) => {
         ]);
 
         res.status(200).json({
-            bookings,
+            bookings: bookings.map(withLegacyDates),
             total,
             totalPages: Math.ceil(total / limitNumber),
             currentPage: pageNumber
         });
-    } catch (error) {
-        res.status(500).json({ message: 'Server error.' });
-    }
-};
-
-// Get single booking by ID (Student/Owner/Admin)
-exports.getBookingById = async (req, res) => {
-    try {
-        const booking = await Booking.findById(req.params.id)
-            .populate('hostel', 'name location pricePerMonth')
-            .populate('owner', 'username email')
-            .populate('student', 'username email');
-
-        if (!booking) {
-            return res.status(404).json({ message: 'Booking not found.' });
-        }
-
-        const isStudent = booking.student?._id.toString() === req.user.id;
-        const isOwner = booking.owner?._id.toString() === req.user.id;
-        const isAdmin = req.user.role === 'admin';
-
-        if (!isStudent && !isOwner && !isAdmin) {
-            return res.status(403).json({ message: 'Not authorized.' });
-        }
-
-        res.status(200).json(booking);
     } catch (error) {
         res.status(500).json({ message: 'Server error.' });
     }
@@ -451,6 +605,7 @@ exports.downloadReceipt = async (req, res) => {
             .populate('hostel', 'name location pricePerMonth')
             .populate('owner', 'username email')
             .populate('student', 'username email');
+        withLegacyDates(booking);
 
         if (!booking) {
             return res.status(404).json({ message: 'Booking not found.' });

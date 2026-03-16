@@ -13,6 +13,99 @@ const createTransporter = () => {
     });
 };
 
+const buildEmailShell = ({ heading, intro, body, footer = '' }) => `
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+        <h2 style="color: #333;">${heading}</h2>
+        <p>${intro}</p>
+        ${body}
+        <hr style="border: none; border-top: 1px solid #eee; margin: 20px 0;">
+        <p style="color: #999; font-size: 12px;">${footer || 'SmartHostelFinder Team'}</p>
+    </div>
+`;
+
+const buildVerificationEmail = (email, username, verificationToken) => {
+    const verificationUrl = `${process.env.CLIENT_URL}/verify-email?token=${verificationToken}`;
+
+    return {
+        to: email,
+        subject: 'Verify Your Email - SmartHostelFinder',
+        html: buildEmailShell({
+            heading: 'Welcome to SmartHostelFinder!',
+            intro: `Hi ${username},`,
+            body: `
+                <p>Thank you for registering. Please verify your email address by clicking the button below:</p>
+                <div style="text-align: center; margin: 30px 0;">
+                    <a href="${verificationUrl}" 
+                       style="background-color: #4CAF50; color: white; padding: 12px 30px; 
+                              text-decoration: none; border-radius: 5px; display: inline-block;">
+                        Verify Email
+                    </a>
+                </div>
+                <p>Or copy and paste this link in your browser:</p>
+                <p style="color: #666; word-break: break-all;">${verificationUrl}</p>
+                <p>This link will expire in 24 hours.</p>
+            `
+        })
+    };
+};
+
+const buildPasswordResetEmail = (email, username, resetToken) => {
+    const resetUrl = `${process.env.CLIENT_URL}/reset-password?token=${resetToken}`;
+
+    return {
+        to: email,
+        subject: 'Password Reset Request - SmartHostelFinder',
+        html: buildEmailShell({
+            heading: 'Password Reset Request',
+            intro: `Hi ${username},`,
+            body: `
+                <p>We received a request to reset your password. Click the button below to create a new password:</p>
+                <div style="text-align: center; margin: 30px 0;">
+                    <a href="${resetUrl}" 
+                       style="background-color: #2196F3; color: white; padding: 12px 30px; 
+                              text-decoration: none; border-radius: 5px; display: inline-block;">
+                        Reset Password
+                    </a>
+                </div>
+                <p>Or copy and paste this link in your browser:</p>
+                <p style="color: #666; word-break: break-all;">${resetUrl}</p>
+                <p>This link will expire in 1 hour.</p>
+            `
+        })
+    };
+};
+
+const buildApprovalEmail = (email, username, isApproved, rejectionReason = '') => {
+    const subject = isApproved
+        ? 'Account Approved - SmartHostelFinder'
+        : 'Account Application Update - SmartHostelFinder';
+
+    const message = isApproved
+        ? 'Congratulations! Your hostel owner account has been approved. You can now log in and start listing your hostels.'
+        : `We regret to inform you that your hostel owner application was not approved${rejectionReason ? `: ${rejectionReason}` : ' at this time.'}`;
+
+    return {
+        to: email,
+        subject,
+        html: buildEmailShell({
+            heading: 'Account Status Update',
+            intro: `Hi ${username},`,
+            body: `
+                <p>${message}</p>
+                ${isApproved ? `
+                <div style="text-align: center; margin: 30px 0;">
+                    <a href="${process.env.CLIENT_URL}/login" 
+                       style="background-color: #4CAF50; color: white; padding: 12px 30px; 
+                              text-decoration: none; border-radius: 5px; display: inline-block;">
+                        Login Now
+                    </a>
+                </div>
+                ` : ''}
+            `
+        })
+    };
+};
+
 /**
  * Send email verification link
  */
@@ -251,4 +344,7 @@ module.exports = {
     sendApprovalEmail,
     sendSuspensionEmail,
     sendBookingConfirmationEmail,
+    buildVerificationEmail,
+    buildPasswordResetEmail,
+    buildApprovalEmail,
 };

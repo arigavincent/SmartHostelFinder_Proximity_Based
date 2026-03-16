@@ -1,4 +1,14 @@
 const mongoose = require('mongoose');
+const { getPublicUrl } = require('../services/storageService');
+
+const buildPublicImageUrl = (imagePath) => {
+    if (!imagePath || /^https?:\/\//i.test(imagePath)) return imagePath;
+    if (String(imagePath).startsWith('uploads/')) {
+        const baseUrl = String(process.env.SERVER_URL || 'http://localhost:5100').replace(/\/+$/, '');
+        return `${baseUrl}/${String(imagePath).replace(/^\/+/, '')}`;
+    }
+    return getPublicUrl(imagePath);
+};
 
 const HostelSchema = new mongoose.Schema({
     name: { type: String, required: true },
@@ -7,8 +17,8 @@ const HostelSchema = new mongoose.Schema({
     
     // Location with geospatial indexing for proximity search
     location: {
-        type: { type: String, enum: ['Point'], default: 'Point' },
-        coordinates: { type: [Number]},
+        type: { type: String, enum: ['Point'], default: undefined },
+        coordinates: { type: [Number], default: undefined },
         address: { type: String},
         city: { type: String},
         nearbyUniversity: { type: String }
@@ -68,7 +78,39 @@ const HostelSchema = new mongoose.Schema({
     
 }, { timestamps: true });
 
-// Geospatial index for proximity queries
-HostelSchema.index({ 'location': '2dsphere' });
+// Only index hostels that actually have valid GeoJSON coordinates.
+HostelSchema.index(
+    { location: '2dsphere' },
+    {
+        partialFilterExpression: {
+            'location.type': 'Point'
+        }
+    }
+);
+HostelSchema.pre('validate', function normalizeLocation() {
+    if (!this.location) {
+        return;
+    }
+
+    const hasCoordinates = Array.isArray(this.location.coordinates)
+        && this.location.coordinates.length === 2
+        && this.location.coordinates.every((value) => Number.isFinite(Number(value)));
+
+    if (hasCoordinates) {
+        this.location.type = 'Point';
+        this.location.coordinates = this.location.coordinates.map((value) => Number(value));
+    } else {
+        this.location.type = undefined;
+        this.location.coordinates = undefined;
+    }
+});
+HostelSchema.set('toJSON', {
+    transform: (doc, ret) => {
+        if (Array.isArray(ret.images)) {
+            ret.images = ret.images.map((image) => buildPublicImageUrl(image));
+        }
+        return ret;
+    }
+});
 
 module.exports = mongoose.model('Hostel', HostelSchema);

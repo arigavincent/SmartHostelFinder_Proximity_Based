@@ -1,21 +1,9 @@
 const jwt = require('jsonwebtoken');
 const { OAuth2Client } = require('google-auth-library');
 const cloudinary = require('../config/cloudinary');
-
-// Upload a buffer to Cloudinary
-// PDFs must use resource_type 'raw' so they are served directly without auth
-const uploadLicenseToCloudinary = (buffer, folder = 'licenses', mimetype = '') =>
-    new Promise((resolve, reject) => {
-        const isPdf = mimetype === 'application/pdf';
-        const stream = cloudinary.uploader.upload_stream(
-            { folder, resource_type: isPdf ? 'raw' : 'image' },
-            (err, result) => (err ? reject(err) : resolve(result.secure_url))
-        );
-        stream.end(buffer);
-    });
 const { hashPassword, comparePassword } = require('../helpers/passwordHelper');
 const { generateToken: generateRandomToken, hashToken } = require('../helpers/tokenHelper');
-const { sendVerificationEmail, sendPasswordResetEmail } = require('../helpers/emailHelper');
+const { buildVerificationEmail, buildPasswordResetEmail } = require('../helpers/emailHelper');
 const { 
     validateStudentRegistration, 
     validateOwnerRegistration, 
@@ -26,6 +14,46 @@ const {
 const Student = require('../models/Students');
 const Owner = require('../models/Owners');
 const Admin = require('../models/Admin');
+const { enqueueJob } = require('../services/jobQueueService');
+const { generateObjectKey, saveBuffer } = require('../services/storageService');
+
+const uploadLicenseToCloudinary = (buffer, folder = 'licenses', mimetype = '') =>
+    new Promise((resolve, reject) => {
+        const isPdf = mimetype === 'application/pdf';
+        const stream = cloudinary.uploader.upload_stream(
+            { folder, resource_type: isPdf ? 'raw' : 'image' },
+            (err, result) => (err ? reject(err) : resolve(result.secure_url))
+        );
+        stream.end(buffer);
+    });
+
+const isCloudinaryConfigured = () => (
+    Boolean(process.env.CLOUDINARY_CLOUD_NAME)
+    && Boolean(process.env.CLOUDINARY_API_KEY)
+    && Boolean(process.env.CLOUDINARY_API_SECRET)
+);
+
+const buildAuthUser = (user) => {
+    const payload = {
+        id: user._id,
+        username: user.username,
+        email: user.email,
+        role: user.role
+    };
+
+    if (user.role === 'owner') {
+        payload.isApproved = Boolean(user.isApproved);
+        payload.isSuspended = Boolean(user.isSuspended);
+        payload.phone = user.phone || '';
+        payload.verificationStatus = user.verification?.status || 'not_submitted';
+    }
+
+    if (user.role === 'student') {
+        payload.phone = user.phone || '';
+    }
+
+    return payload;
+};
 
 // Google OAuth client
 const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
@@ -33,9 +61,11 @@ const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 // Generate JWT Token
 const generateToken = (user) => {
     const expiresIn = process.env.JWT_EXPIRES_IN || '30d';
-    const payload = { id: user._id, email: user.email, role: user.role };
-    if (user.role === 'owner') payload.isApproved = user.isApproved ?? false;
-    return jwt.sign(payload, process.env.JWT_SECRET, { expiresIn });
+    return jwt.sign(
+        { id: user._id, email: user.email, role: user.role },
+        process.env.JWT_SECRET,
+        { expiresIn }
+    );
 };
 
 // Student Registration
@@ -79,12 +109,14 @@ exports.registerStudent = async (req, res) => {
         
         const savedStudent = await student.save();
         
-        // Send verification email
-        try {
-            await sendVerificationEmail(email, username, verificationToken);
-        } catch (emailError) {
-            console.error('Email sending failed:', emailError.message);
-        }
+        await enqueueJob({
+            type: 'email',
+            payload: buildVerificationEmail(email, username, verificationToken),
+            createdBy: savedStudent._id,
+            createdByModel: 'Student',
+            maxAttempts: 5,
+            priority: 5
+        });
         
         res.status(201).json({
             message: 'Student registered. Please check your email to verify your account.',
@@ -99,16 +131,7 @@ exports.registerStudent = async (req, res) => {
 exports.registerOwner = async (req, res) => {
     try {
         const { username, email, password } = req.body;
-
-        // Upload license to Cloudinary if provided
         let businessLicense = null;
-        if (req.file) {
-            try {
-                businessLicense = await uploadLicenseToCloudinary(req.file.buffer, 'licenses', req.file.mimetype);
-            } catch (uploadErr) {
-                return res.status(500).json({ message: 'Failed to upload business license. Please try again.' });
-            }
-        }
         
         // Validate input fields (including license check)
         const validation = validateOwnerRegistration({ username, email, password }, !!req.file);
@@ -135,6 +158,17 @@ exports.registerOwner = async (req, res) => {
         const verificationToken = generateRandomToken();
         const hashedVerificationToken = hashToken(verificationToken);
         
+        if (req.file?.buffer && isCloudinaryConfigured()) {
+            businessLicense = await uploadLicenseToCloudinary(req.file.buffer, 'licenses', req.file.mimetype);
+        } else if (req.file?.buffer) {
+            businessLicense = generateObjectKey(`private/documents/${email || 'owner-registration'}`, req.file.originalname);
+            await saveBuffer({
+                key: businessLicense,
+                buffer: req.file.buffer,
+                contentType: req.file.mimetype
+            });
+        }
+
         // Create owner
         const owner = new Owner({
             username,
@@ -147,15 +181,17 @@ exports.registerOwner = async (req, res) => {
         
         const savedOwner = await owner.save();
         
-        // Send verification email
-        try {
-            await sendVerificationEmail(email, username, verificationToken);
-        } catch (emailError) {
-            console.error('Email sending failed:', emailError.message);
-        }
+        await enqueueJob({
+            type: 'email',
+            payload: buildVerificationEmail(email, username, verificationToken),
+            createdBy: savedOwner._id,
+            createdByModel: 'Owner',
+            maxAttempts: 5,
+            priority: 5
+        });
         
         res.status(201).json({
-            message: 'Owner registered. Please verify your email. Admin approval pending.',
+            message: 'Owner registered. Please verify your email, then complete owner verification after login.',
             user: { id: savedOwner._id, username: savedOwner.username, email: savedOwner.email }
         });
     } catch (error) {
@@ -204,6 +240,10 @@ exports.login = async (req, res) => {
             });
         }
         
+        if (user.role === 'owner' && user.isSuspended) {
+            return res.status(403).json({ message: 'Account is suspended. Please contact support.' });
+        }
+        
         // Verify password
         const validPassword = await comparePassword(password, user.password);
         if (!validPassword) {
@@ -216,13 +256,7 @@ exports.login = async (req, res) => {
         res.status(200).json({
             message: 'Login successful.',
             token,
-            user: {
-                id: user._id,
-                username: user.username,
-                email: user.email,
-                role: user.role,
-                ...(user.role === 'owner' && { isApproved: user.isApproved ?? false })
-            }
+            user: buildAuthUser(user)
         });
     } catch (error) {
         res.status(500).json({ message: 'Server error.' });
@@ -252,7 +286,7 @@ exports.getProfile = async (req, res) => {
             return res.status(404).json({ message: 'User not found.' });
         }
         
-        res.status(200).json(user);
+        res.status(200).json(buildAuthUser(user));
     } catch (error) {
         res.status(500).json({ message: 'Server error.' });
     }
@@ -327,7 +361,14 @@ exports.resendVerificationEmail = async (req, res) => {
         user.emailVerificationExpires = Date.now() + 24 * 60 * 60 * 1000;
         await user.save();
         
-        await sendVerificationEmail(email, user.username, verificationToken);
+        await enqueueJob({
+            type: 'email',
+            payload: buildVerificationEmail(email, user.username, verificationToken),
+            createdBy: user._id,
+            createdByModel: user.role === 'owner' ? 'Owner' : 'Student',
+            maxAttempts: 5,
+            priority: 5
+        });
         
         res.status(200).json({ message: 'Verification email sent.' });
     } catch (error) {
@@ -369,8 +410,14 @@ exports.forgotPassword = async (req, res) => {
         user.passwordResetExpires = Date.now() + 60 * 60 * 1000; // 1 hour
         await user.save();
         
-        // Send reset email
-        await sendPasswordResetEmail(email, user.username, resetToken);
+        await enqueueJob({
+            type: 'email',
+            payload: buildPasswordResetEmail(email, user.username, resetToken),
+            createdBy: user._id,
+            createdByModel: user.role === 'admin' ? 'Admin' : (user.role === 'owner' ? 'Owner' : 'Student'),
+            maxAttempts: 5,
+            priority: 5
+        });
         
         res.status(200).json({ 
             message: 'Password reset link sent to your email.',
@@ -484,19 +531,17 @@ exports.googleLogin = async (req, res) => {
             await user.save();
         }
         
+        if (user.role === 'owner' && user.isSuspended) {
+            return res.status(403).json({ message: 'Account is suspended. Please contact support.' });
+        }
+        
         // Generate JWT
         const jwtToken = generateToken(user);
         
         res.status(200).json({
             message: 'Google login successful.',
             token: jwtToken,
-            user: {
-                id: user._id,
-                username: user.username,
-                email: user.email,
-                role: user.role,
-                ...(user.role === 'owner' && { isApproved: user.isApproved ?? false })
-            }
+            user: buildAuthUser(user)
         });
     } catch (error) {
         res.status(500).json({ message: 'Google authentication failed.' });

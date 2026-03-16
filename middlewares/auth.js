@@ -1,7 +1,8 @@
 const jwt = require('jsonwebtoken');
+const Owner = require('../models/Owners');
 
 // Verify JWT Token
-const verifyToken = (req, res, next) => {
+const verifyToken = async (req, res, next) => {
     const authHeader = req.headers.authorization;
     
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -12,6 +13,18 @@ const verifyToken = (req, res, next) => {
     
     try {
         const decoded = jwt.verify(token, process.env.JWT_SECRET);
+
+        if (decoded.role === 'owner') {
+            const owner = await Owner.findById(decoded.id).select('isSuspended');
+            if (!owner) {
+                return res.status(404).json({ message: 'Owner account not found.' });
+            }
+
+            if (owner.isSuspended) {
+                return res.status(403).json({ message: 'Owner account is suspended.' });
+            }
+        }
+
         req.user = decoded;
         next();
     } catch (error) {
@@ -63,4 +76,31 @@ const verifyOwnerOrAdmin = (req, res, next) => {
     });
 };
 
-module.exports = { verifyToken, verifyAdmin, verifyOwner, verifyStudent, verifyOwnerOrAdmin };
+const optionalToken = async (req, res, next) => {
+    const authHeader = req.headers.authorization;
+
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+        return next();
+    }
+
+    const token = authHeader.split(' ')[1];
+
+    try {
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+
+        if (decoded.role === 'owner') {
+            const owner = await Owner.findById(decoded.id).select('isSuspended');
+            if (!owner || owner.isSuspended) {
+                return next();
+            }
+        }
+
+        req.user = decoded;
+    } catch (error) {
+        // Treat invalid optional auth as anonymous for public routes.
+    }
+
+    next();
+};
+
+module.exports = { verifyToken, verifyAdmin, verifyOwner, verifyStudent, verifyOwnerOrAdmin, optionalToken };

@@ -1,9 +1,14 @@
 const Hostel = require('../models/Hostel');
 const Owner = require('../models/Owners');
-const Booking = require('../models/Booking');
 const cloudinary = require('../config/cloudinary');
+const { logger } = require('../helpers/logger');
+const {
+    deleteObject,
+    extractStorageKey,
+    generateObjectKey,
+    saveBuffer
+} = require('../services/storageService');
 
-// ── Cloudinary helpers ───────────────────────────────────────────────────────
 const uploadToCloudinary = (buffer, folder = 'hostels') =>
     new Promise((resolve, reject) => {
         const stream = cloudinary.uploader.upload_stream(
@@ -15,17 +20,54 @@ const uploadToCloudinary = (buffer, folder = 'hostels') =>
 
 const deleteFromCloudinary = async (url) => {
     try {
-        // Extract public_id: everything after /upload/[vXXXX/]{folder}/{name}.ext
-        const parts = url.split('/');
+        const parts = String(url || '').split('/');
         const uploadIdx = parts.indexOf('upload');
         if (uploadIdx === -1) return;
-        // Skip optional version segment (e.g. v1234567)
         const afterUpload = parts.slice(uploadIdx + 1);
         const startIdx = /^v\d+$/.test(afterUpload[0]) ? 1 : 0;
         const publicIdWithExt = afterUpload.slice(startIdx).join('/');
         const publicId = publicIdWithExt.replace(/\.[^/.]+$/, '');
+        if (!publicId) return;
         await cloudinary.uploader.destroy(publicId);
-    } catch { /* best-effort – don't fail the request */ }
+    } catch (_error) {
+        return null;
+    }
+};
+
+const isCloudinaryConfigured = () => (
+    Boolean(process.env.CLOUDINARY_CLOUD_NAME)
+    && Boolean(process.env.CLOUDINARY_API_KEY)
+    && Boolean(process.env.CLOUDINARY_API_SECRET)
+);
+
+const saveHostelImage = async (ownerId, file) => {
+    if (!file?.buffer) return null;
+
+    if (isCloudinaryConfigured()) {
+        return uploadToCloudinary(file.buffer, 'hostels');
+    }
+
+    const key = generateObjectKey(`public/images/${ownerId}`, file.originalname);
+    await saveBuffer({
+        key,
+        buffer: file.buffer,
+        contentType: file.mimetype
+    });
+    return key;
+};
+
+const deleteHostelImageObject = async (storedImage) => {
+    if (!storedImage) return;
+
+    if (String(storedImage).includes('/upload/')) {
+        await deleteFromCloudinary(storedImage);
+        return;
+    }
+
+    const normalizedPath = extractStorageKey(storedImage);
+    if (normalizedPath) {
+        await deleteObject(normalizedPath).catch(() => null);
+    }
 };
 
 const OWNER_ALLOWED_HOSTEL_UPDATES = new Set([
@@ -63,98 +105,116 @@ const pickAllowedHostelUpdates = (payload, isAdmin) => {
     return updates;
 };
 
+const parseJsonField = (value) => {
+    if (value === undefined || value === null) return value;
+    if (typeof value !== 'string') return value;
+
+    try {
+        return JSON.parse(value);
+    } catch (error) {
+        return value;
+    }
+};
+
+const normalizeHostelPayload = (payload = {}) => {
+    const body = { ...payload };
+    body.location = parseJsonField(body.location);
+    body.amenities = parseJsonField(body.amenities);
+
+    if (body.location && Array.isArray(body.location.coordinates)) {
+        body.location.type = 'Point';
+        body.location.coordinates = body.location.coordinates.map((coordinate) => parseFloat(coordinate));
+    }
+
+    if (body.amenities && typeof body.amenities === 'object') {
+        Object.keys(body.amenities).forEach((key) => {
+            if (typeof body.amenities[key] === 'string') {
+                body.amenities[key] = body.amenities[key] === 'true';
+            }
+        });
+    }
+
+    return body;
+};
+
+const canManageHostel = (hostel, user) => {
+    if (!user) return false;
+    return user.role === 'admin' || hostel.owner.toString() === user.id;
+};
+
+const getClientFacingError = (error) => {
+    if (!error) {
+        return { statusCode: 500, message: 'Server error.' };
+    }
+
+    if (error.statusCode && error.statusCode < 500) {
+        return { statusCode: error.statusCode, message: error.message };
+    }
+
+    if (error.name === 'ValidationError') {
+        const firstMessage = Object.values(error.errors || {})[0]?.message;
+        return {
+            statusCode: 400,
+            message: firstMessage || 'Invalid hostel data.'
+        };
+    }
+
+    if (error.code === 11000) {
+        return {
+            statusCode: 409,
+            message: 'A hostel with the same unique data already exists.'
+        };
+    }
+
+    if (error.name === 'MongoServerError' || error.name === 'MongoError') {
+        return {
+            statusCode: 400,
+            message: error.message || 'Database rejected the hostel data.'
+        };
+    }
+
+    return {
+        statusCode: 500,
+        message: error.message || 'Server error.'
+    };
+};
+
 // Create a new hostel (Owner only)
 exports.createHostel = async (req, res) => {
     try {
-        const body = { ...req.body };
-
-        // Parse JSON-stringified nested fields from FormData
-        if (typeof body.location === 'string') {
-            try { body.location = JSON.parse(body.location); } catch { body.location = {}; }
-        }
-        if (typeof body.amenities === 'string') {
-            try { body.amenities = JSON.parse(body.amenities); } catch { body.amenities = {}; }
-        }
-
-        // Upload images to Cloudinary
-        const imageUrls = [];
-        if (req.files && req.files.length > 0) {
-            for (const file of req.files) {
-                const url = await uploadToCloudinary(file.buffer, 'hostels');
-                imageUrls.push(url);
-            }
+        const body = normalizeHostelPayload(req.body);
+        const uploadedImages = req.files || [];
+        const images = [];
+        for (const file of uploadedImages) {
+            const storedImage = await saveHostelImage(req.user.id, file);
+            if (storedImage) images.push(storedImage);
         }
 
         const hostelData = {
             ...body,
             owner: req.user.id,
-            images: imageUrls
+            images
         };
-
+        
         const hostel = new Hostel(hostelData);
         const savedHostel = await hostel.save();
-
+        
         await Owner.findByIdAndUpdate(req.user.id, {
             $push: { hostels: savedHostel._id }
         });
-
+        
         res.status(201).json({
             message: 'Hostel created. Pending admin approval.',
             hostel: savedHostel
         });
     } catch (error) {
-        res.status(500).json({ message: 'Server error.', error: error.message });
-    }
-};
-
-// Upload images to existing hostel (Owner only)
-exports.uploadHostelImages = async (req, res) => {
-    try {
-        const hostel = await Hostel.findById(req.params.id);
-        if (!hostel) return res.status(404).json({ message: 'Hostel not found.' });
-        if (hostel.owner.toString() !== req.user.id) {
-            return res.status(403).json({ message: 'Not authorized.' });
-        }
-        if (!req.files || req.files.length === 0) {
-            return res.status(400).json({ message: 'No images provided.' });
-        }
-
-        const imageUrls = [];
-        for (const file of req.files) {
-            const url = await uploadToCloudinary(file.buffer, 'hostels');
-            imageUrls.push(url);
-        }
-
-        hostel.images.push(...imageUrls);
-        await hostel.save();
-
-        res.status(200).json({ message: 'Images uploaded.', images: hostel.images });
-    } catch (error) {
-        res.status(500).json({ message: 'Server error.', error: error.message });
-    }
-};
-
-// Delete a single image from hostel (Owner/Admin)
-exports.deleteHostelImage = async (req, res) => {
-    try {
-        const { url } = req.query;
-        if (!url) return res.status(400).json({ message: 'Image URL required as query param ?url=...' });
-
-        const hostel = await Hostel.findById(req.params.id);
-        if (!hostel) return res.status(404).json({ message: 'Hostel not found.' });
-        if (hostel.owner.toString() !== req.user.id && req.user.role !== 'admin') {
-            return res.status(403).json({ message: 'Not authorized.' });
-        }
-
-        hostel.images = hostel.images.filter(img => img !== url);
-        await hostel.save();
-
-        // Remove from Cloudinary (best-effort)
-        await deleteFromCloudinary(url);
-
-        res.status(200).json({ message: 'Image deleted.', images: hostel.images });
-    } catch (error) {
-        res.status(500).json({ message: 'Server error.', error: error.message });
+        const clientError = getClientFacingError(error);
+        logger.error('hostel.create_failed', {
+            ownerId: req.user?.id,
+            error: error.message,
+            stack: error.stack
+        });
+        res.status(clientError.statusCode).json({ message: clientError.message });
     }
 };
 
@@ -187,7 +247,14 @@ exports.getAllHostels = async (req, res) => {
             total
         });
     } catch (error) {
-        res.status(500).json({ message: 'Server error.' });
+        const clientError = getClientFacingError(error);
+        logger.error('hostel.update_failed', {
+            hostelId: req.params.id,
+            actorId: req.user?.id,
+            error: error.message,
+            stack: error.stack
+        });
+        res.status(clientError.statusCode).json({ message: clientError.message });
     }
 };
 
@@ -222,28 +289,45 @@ exports.searchByProximity = async (req, res) => {
             hostels
         });
     } catch (error) {
-        res.status(500).json({ message: 'Server error.' });
+        const clientError = getClientFacingError(error);
+        logger.error('hostel.upload_images_failed', {
+            hostelId: req.params.id,
+            actorId: req.user?.id,
+            error: error.message,
+            stack: error.stack
+        });
+        res.status(clientError.statusCode).json({ message: clientError.message });
     }
 };
 
 // Get single hostel by ID
 exports.getHostelById = async (req, res) => {
     try {
-        const hostel = await Hostel.findOne({
-            _id: req.params.id,
-            isApproved: true,
-            isActive: true
-        })
+        const hostel = await Hostel.findById(req.params.id)
             .populate('owner', 'username email')
             .populate('ratings.student', 'username');
         
         if (!hostel) {
             return res.status(404).json({ message: 'Hostel not found.' });
         }
+
+        const isManager = canManageHostel(hostel, req.user);
+        const isPubliclyVisible = hostel.isApproved && hostel.isActive;
+
+        if (!isPubliclyVisible && !isManager) {
+            return res.status(404).json({ message: 'Hostel not found.' });
+        }
         
         res.status(200).json(hostel);
     } catch (error) {
-        res.status(500).json({ message: 'Server error.' });
+        const clientError = getClientFacingError(error);
+        logger.error('hostel.delete_image_failed', {
+            hostelId: req.params.id,
+            actorId: req.user?.id,
+            error: error.message,
+            stack: error.stack
+        });
+        res.status(clientError.statusCode).json({ message: clientError.message });
     }
 };
 
@@ -262,7 +346,8 @@ exports.updateHostel = async (req, res) => {
         }
 
         const isAdmin = req.user.role === 'admin';
-        const updates = pickAllowedHostelUpdates(req.body, isAdmin);
+        const normalizedPayload = normalizeHostelPayload(req.body);
+        const updates = pickAllowedHostelUpdates(normalizedPayload, isAdmin);
 
         if (Object.keys(updates).length === 0) {
             return res.status(400).json({ message: 'No valid fields provided for update.' });
@@ -322,6 +407,74 @@ exports.updateHostel = async (req, res) => {
     }
 };
 
+// Upload hostel images (Owner/Admin)
+exports.uploadHostelImages = async (req, res) => {
+    try {
+        const hostel = await Hostel.findById(req.params.id);
+
+        if (!hostel) {
+            return res.status(404).json({ message: 'Hostel not found.' });
+        }
+
+        if (!canManageHostel(hostel, req.user)) {
+            return res.status(403).json({ message: 'Not authorized to update this hostel.' });
+        }
+
+        const newImages = [];
+        for (const file of req.files || []) {
+            const storedImage = await saveHostelImage(hostel.owner, file);
+            if (storedImage) newImages.push(storedImage);
+        }
+        hostel.images = [...hostel.images, ...newImages].slice(0, 10);
+        await hostel.save();
+        const serializedHostel = hostel.toJSON();
+
+        res.status(200).json({
+            message: 'Images uploaded successfully.',
+            images: serializedHostel.images
+        });
+    } catch (error) {
+        res.status(500).json({ message: 'Server error.' });
+    }
+};
+
+// Delete specific hostel image (Owner/Admin)
+exports.deleteHostelImage = async (req, res) => {
+    try {
+        const imageUrl = String(req.query.url || '').trim();
+        if (!imageUrl) {
+            return res.status(400).json({ message: 'Image url is required.' });
+        }
+
+        const hostel = await Hostel.findById(req.params.id);
+
+        if (!hostel) {
+            return res.status(404).json({ message: 'Hostel not found.' });
+        }
+
+        if (!canManageHostel(hostel, req.user)) {
+            return res.status(403).json({ message: 'Not authorized to update this hostel.' });
+        }
+
+        const existingImage = hostel.images.find((image) => image === imageUrl);
+        if (!existingImage) {
+            return res.status(404).json({ message: 'Image not found on this hostel.' });
+        }
+
+        hostel.images = hostel.images.filter((image) => image !== existingImage);
+        await hostel.save();
+        await deleteHostelImageObject(existingImage);
+        const serializedHostel = hostel.toJSON();
+
+        res.status(200).json({
+            message: 'Image deleted successfully.',
+            images: serializedHostel.images
+        });
+    } catch (error) {
+        res.status(500).json({ message: 'Server error.' });
+    }
+};
+
 // Delete hostel (Owner/Admin)
 exports.deleteHostel = async (req, res) => {
     try {
@@ -335,6 +488,8 @@ exports.deleteHostel = async (req, res) => {
         if (hostel.owner.toString() !== req.user.id && req.user.role !== 'admin') {
             return res.status(403).json({ message: 'Not authorized to delete this hostel.' });
         }
+
+        await Promise.all((hostel.images || []).map((imageUrl) => deleteHostelImageObject(imageUrl)));
         
         await Hostel.findByIdAndDelete(req.params.id);
         
@@ -354,28 +509,17 @@ exports.addRating = async (req, res) => {
     try {
         const { rating, review } = req.body;
         const hostelId = req.params.id;
-
-        if (!rating || rating < 1 || rating > 5) {
+        
+        if (rating < 1 || rating > 5) {
             return res.status(400).json({ message: 'Rating must be between 1 and 5.' });
         }
-
-        // Verify student has a confirmed booking for this hostel
-        const confirmedBooking = await Booking.findOne({
-            student: req.user.id,
-            hostel: hostelId,
-            status: 'confirmed',
-        });
-        if (!confirmedBooking) {
-            return res.status(403).json({
-                message: 'You can only rate a hostel after a confirmed booking.',
-            });
-        }
-
+        
         const hostel = await Hostel.findById(hostelId);
+        
         if (!hostel) {
             return res.status(404).json({ message: 'Hostel not found.' });
         }
-
+        
         // Check if student already rated
         const existingRating = hostel.ratings.find(
             r => r.student.toString() === req.user.id

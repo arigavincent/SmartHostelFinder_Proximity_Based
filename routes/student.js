@@ -13,5 +13,7 @@ router.put('/profile', studentController.updateProfile);
 router.get('/favorites', studentController.getFavorites);
 router.post('/favorites/:hostelId', studentController.addToFavorites);
 router.delete('/favorites/:hostelId', studentController.removeFromFavorites);
+router.get('/announcements', studentController.getAnnouncements);
+router.post('/announcements/:announcementId/read', studentController.markAnnouncementRead);
 
 module.exports = router;
