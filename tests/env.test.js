@@ -43,7 +43,29 @@ test('validateEnv returns normalized runtime config for development', () => {
         assert.equal(env.rateLimitWindowMs, 120000);
         assert.equal(env.rateLimitMax, 100);
         assert.equal(env.authRateLimitMax, 10);
+        assert.equal(env.chatbotRateLimitMax, 60);
         assert.equal(env.trustProxy, true);
+        assert.equal(env.chatbotServiceUrl, 'http://localhost:8000');
+        assert.equal(env.chatbotServiceTimeoutMs, 30000);
+        assert.equal(env.chatbotServiceToken, '');
+    });
+});
+
+test('validateEnv includes clientUrl in cors origins when not explicitly listed', () => {
+    withEnv({
+        NODE_ENV: 'development',
+        MONGO_URI: 'mongodb://localhost:27017/test',
+        JWT_SECRET: 'super-secret',
+        CLIENT_URL: 'http://localhost:5174',
+        CORS_ORIGINS: 'http://localhost:3000,http://localhost:5173'
+    }, () => {
+        const env = validateEnv();
+
+        assert.deepEqual(env.corsOrigins, [
+            'http://localhost:3000',
+            'http://localhost:5173',
+            'http://localhost:5174'
+        ]);
     });
 });
 

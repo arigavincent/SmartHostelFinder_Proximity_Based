@@ -15,9 +15,11 @@ const adminRoutes = require('./routes/admin');
 const bookingRoutes = require('./routes/booking');
 const paymentRoutes = require('./routes/payment');
 const storageRoutes = require('./routes/storage');
+const chatbotRoutes = require('./routes/chatbot');
 
 const createApp = (env) => {
     const app = express();
+    app.locals.env = env;
 
     app.disable('x-powered-by');
     if (env.trustProxy) {
@@ -63,6 +65,19 @@ const createApp = (env) => {
         }
     });
 
+    const chatbotRateLimiter = rateLimit({
+        windowMs: env.rateLimitWindowMs,
+        limit: env.chatbotRateLimitMax,
+        standardHeaders: true,
+        legacyHeaders: false,
+        handler(req, res) {
+            res.status(429).json({
+                message: 'Too many chatbot requests. Please try again later.',
+                requestId: req.requestId
+            });
+        }
+    });
+
     app.use(requestContext);
     app.use(metricsMiddleware);
     app.use(helmet({
@@ -82,6 +97,7 @@ const createApp = (env) => {
     app.use('/api/bookings', bookingRoutes);
     app.use('/api/payments', paymentRoutes);
     app.use('/api/storage', storageRoutes);
+    app.use('/api/chatbot', chatbotRateLimiter, chatbotRoutes);
 
     app.get('/api/health', (req, res) => {
         res.status(200).json({
@@ -104,7 +120,8 @@ const createApp = (env) => {
                 owners: '/api/owners',
                 admin: '/api/admin',
                 bookings: '/api/bookings',
-                payments: '/api/payments'
+                payments: '/api/payments',
+                chatbot: '/api/chatbot'
             }
         });
     });

@@ -194,6 +194,78 @@ test('student booking flow confirms payment and exposes real booking/payment sta
     assert.equal(savedBooking.status, 'confirmed');
 });
 
+test('student can switch a pending booking payment method to card at checkout', async () => {
+    const student = await Student.create({
+        username: 'Card Switch Student',
+        email: 'cardswitch@student.test',
+        password: await hashPassword('Passw0rd'),
+        isEmailVerified: true
+    });
+    const owner = await Owner.create({
+        username: 'Card Switch Owner',
+        email: 'cardswitch-owner@test.local',
+        password: await hashPassword('Passw0rd'),
+        role: 'owner',
+        isEmailVerified: true,
+        isApproved: true,
+        businessLicense: 'private/documents/card-switch-license.pdf'
+    });
+    const hostel = await Hostel.create({
+        name: 'Card Switch Residency',
+        description: 'Integration hostel',
+        owner: owner._id,
+        location: {
+            type: 'Point',
+            coordinates: [36.8219, -1.2921],
+            address: 'Kenyatta Avenue',
+            city: 'Nairobi',
+            nearbyUniversity: 'UoN'
+        },
+        pricePerMonth: 9000,
+        hostelType: 'mixed',
+        totalRooms: 10,
+        availableRooms: 3,
+        amenities: { wifi: true },
+        images: [],
+        isApproved: true,
+        isActive: true,
+        contactPhone: '0712345678',
+        contactEmail: owner.email
+    });
+
+    const studentToken = signToken(student);
+
+    const createResponse = await request(app)
+        .post('/api/bookings')
+        .set('Authorization', `Bearer ${studentToken}`)
+        .send({
+            hostelId: String(hostel._id),
+            rooms: 1,
+            paymentMethod: 'mpesa',
+            startDate: '2026-05-01',
+            endDate: '2026-06-01'
+        });
+
+    assert.equal(createResponse.status, 201);
+
+    const bookingId = createResponse.body.booking._id;
+    const confirmResponse = await request(app)
+        .post(`/api/bookings/${bookingId}/confirm-payment`)
+        .set('Authorization', `Bearer ${studentToken}`)
+        .send({
+            paymentMethod: 'card',
+            paymentReference: 'CARD-SWITCH-001'
+        });
+
+    assert.equal(confirmResponse.status, 200);
+    assert.equal(confirmResponse.body.confirmed, true);
+
+    const updatedBooking = await Booking.findById(bookingId);
+    assert.equal(updatedBooking.payment.method, 'card');
+    assert.equal(updatedBooking.payment.status, 'paid');
+    assert.equal(updatedBooking.status, 'confirmed');
+});
+
 test('owner verification submission can be reviewed by admin and queues approval email', async () => {
     const admin = await Admin.create({
         username: 'Admin User',

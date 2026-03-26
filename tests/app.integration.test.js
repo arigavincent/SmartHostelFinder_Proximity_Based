@@ -17,7 +17,11 @@ const testEnv = {
     rateLimitWindowMs: 60 * 1000,
     rateLimitMax: 5,
     authRateLimitMax: 1,
-    trustProxy: false
+    chatbotRateLimitMax: 1,
+    trustProxy: false,
+    chatbotServiceUrl: 'http://localhost:8000',
+    chatbotServiceTimeoutMs: 30000,
+    chatbotServiceToken: ''
 };
 
 test('GET /api/health returns health payload and request id header', async () => {
@@ -65,5 +69,22 @@ test('auth routes are rate limited before controller logic', async () => {
     assert.equal(first.status, 400);
     assert.equal(second.status, 429);
     assert.equal(second.body.message, 'Too many authentication attempts. Please try again later.');
+    assert.ok(second.body.requestId);
+});
+
+test('chatbot routes are rate limited before controller logic', async () => {
+    const app = createApp(testEnv);
+
+    const first = await request(app)
+        .post('/api/chatbot/message')
+        .send({ message: 'Hello chatbot' });
+
+    const second = await request(app)
+        .post('/api/chatbot/message')
+        .send({ message: 'Hello again chatbot' });
+
+    assert.notEqual(first.status, 429);
+    assert.equal(second.status, 429);
+    assert.equal(second.body.message, 'Too many chatbot requests. Please try again later.');
     assert.ok(second.body.requestId);
 });

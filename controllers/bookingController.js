@@ -254,7 +254,7 @@ exports.getBookingById = async (req, res) => {
 // Confirm payment - Student compatibility endpoint
 exports.confirmPayment = async (req, res) => {
     try {
-        const { paymentReference, phone, phoneNumber } = req.body;
+        const { paymentReference, phone, phoneNumber, paymentMethod, provider } = req.body;
         
         const booking = await Booking.findById(req.params.id);
         if (!booking) {
@@ -273,7 +273,14 @@ exports.confirmPayment = async (req, res) => {
             return res.status(200).json({ confirmed: true, message: 'Payment already confirmed.', booking: withLegacyDates(booking) });
         }
 
-        if (booking.payment.method === 'card') {
+        const selectedMethod = normalizePaymentMethod(paymentMethod || provider) || booking.payment.method;
+        if (!selectedMethod) {
+            return res.status(400).json({ message: 'Payment method must be mpesa or card.' });
+        }
+
+        booking.payment.method = selectedMethod;
+
+        if (selectedMethod === 'card') {
             await finalizePaidBooking(booking, paymentReference || `CARD-${Date.now()}`);
             return res.status(200).json({
                 confirmed: true,
