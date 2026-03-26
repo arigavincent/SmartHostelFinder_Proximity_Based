@@ -156,7 +156,8 @@ exports.sendMessage = async (req, res) => {
 
         const groundedContext = await chatbotContextService.buildContext({
             user: effectiveUser,
-            clientContext: context
+            clientContext: context,
+            userMessage: message
         });
 
         const preparedRequest = await chatSessionService.prepareRequest({

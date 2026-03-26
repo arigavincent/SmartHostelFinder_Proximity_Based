@@ -281,6 +281,66 @@ test('chatbot request includes grounded student context from backend data', { co
     assert.equal(seenPayload.context.livePlatformSnapshot.universityCoverageSample.includes('Kirinyaga University'), true);
 });
 
+test('chatbot request resolves a public hostel match for hostel detail questions', { concurrency: false }, async (t) => {
+    const owner = await Owner.create({
+        username: 'Riverside Owner',
+        email: 'riverside-owner@test.local',
+        password: await hashPassword('Passw0rd'),
+        role: 'owner',
+        isEmailVerified: true,
+        isApproved: true,
+        businessLicense: 'private/documents/riverside-license.pdf'
+    });
+
+    await Hostel.create({
+        name: 'Riverside Executive Suites',
+        description: 'Modern rooms near campus with strong Wi-Fi and water.',
+        owner: owner._id,
+        location: {
+            type: 'Point',
+            coordinates: [37.2783, -0.4989],
+            address: 'Kutus',
+            city: 'Kerugoya',
+            nearbyUniversity: 'Kirinyaga University'
+        },
+        pricePerMonth: 9200,
+        hostelType: 'mixed',
+        totalRooms: 30,
+        availableRooms: 5,
+        amenities: { wifi: true, water: true, security: true },
+        images: [],
+        isApproved: true,
+        isActive: true,
+        contactPhone: '0712345678',
+        contactEmail: owner.email
+    });
+
+    let seenPayload = null;
+    t.mock.method(axios, 'post', async (url, payload) => {
+        seenPayload = payload;
+        return {
+            data: {
+                reply: 'Grounded hostel reply',
+                model: 'gemini-2.5-flash',
+                provider: 'gemini',
+                usedStub: false,
+                suggestions: []
+            }
+        };
+    });
+
+    const response = await request(app)
+        .post('/api/chatbot/message')
+        .send({
+            message: 'What can you tell me about this Riverside hostel?'
+        });
+
+    assert.equal(response.status, 200);
+    assert.equal(seenPayload.context.resolvedHostelMatch.name, 'Riverside Executive Suites');
+    assert.equal(seenPayload.context.resolvedHostelMatch.pricePerMonth, 9200);
+    assert.equal(seenPayload.context.resolvedHostelMatch.amenities.includes('wifi'), true);
+});
+
 test('chatbot session fetch is blocked for a different authenticated user', { concurrency: false }, async () => {
     const owner = await Student.create({
         username: 'Session Owner',

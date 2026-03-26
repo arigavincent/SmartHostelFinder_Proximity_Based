@@ -20,6 +20,32 @@ const DEFAULT_PLATFORM_CONTEXT = {
     currency: 'KES'
 };
 
+const normalizeSearchText = (value) => String(value || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+
+const STOP_TOKENS = new Set([
+    'hostel',
+    'hostels',
+    'about',
+    'tell',
+    'give',
+    'what',
+    'which',
+    'this',
+    'that',
+    'near',
+    'show',
+    'details',
+    'detail',
+    'info',
+    'information',
+    'can',
+    'you',
+    'me'
+]);
+
 const pickTruthyAmenities = (amenities = {}) => Object.entries(amenities)
     .filter(([, value]) => Boolean(value))
     .map(([key]) => key);
@@ -244,7 +270,76 @@ const buildPlatformSnapshot = async () => {
     };
 };
 
-const buildContext = async ({ user, clientContext }) => {
+const scoreHostelNameMatch = (message, hostelName) => {
+    const normalizedMessage = normalizeSearchText(message);
+    const normalizedHostelName = normalizeSearchText(hostelName);
+
+    if (!normalizedMessage || !normalizedHostelName) {
+        return 0;
+    }
+
+    if (normalizedMessage.includes(normalizedHostelName)) {
+        return 100;
+    }
+
+    const messageTokens = new Set(normalizedMessage.split(' ').filter(Boolean));
+    const hostelTokens = normalizedHostelName
+        .split(' ')
+        .filter((token) => token && token.length > 2 && !STOP_TOKENS.has(token));
+
+    if (hostelTokens.length === 0) {
+        return 0;
+    }
+
+    const matchedTokens = hostelTokens.filter((token) => messageTokens.has(token));
+    if (matchedTokens.length === 0) {
+        return 0;
+    }
+
+    return matchedTokens.length * 20 + (matchedTokens.length === hostelTokens.length ? 20 : 0);
+};
+
+const buildResolvedHostelContext = async (message) => {
+    const normalizedMessage = normalizeSearchText(message);
+    if (!isDatabaseReady() || !normalizedMessage || !normalizedMessage.includes('hostel')) {
+        return {};
+    }
+
+    const publicHostels = await Hostel.find({ isApproved: true, isActive: true })
+        .select('name description location.nearbyUniversity location.city pricePerMonth availableRooms averageRating amenities hostelType')
+        .limit(100)
+        .lean();
+
+    let bestMatch = null;
+    let bestScore = 0;
+    for (const hostel of publicHostels) {
+        const score = scoreHostelNameMatch(normalizedMessage, hostel.name);
+        if (score > bestScore) {
+            bestMatch = hostel;
+            bestScore = score;
+        }
+    }
+
+    if (!bestMatch || bestScore < 20) {
+        return {};
+    }
+
+    return {
+        resolvedHostelMatch: {
+            name: bestMatch.name,
+            description: bestMatch.description,
+            nearbyUniversity: bestMatch.location?.nearbyUniversity || null,
+            city: bestMatch.location?.city || null,
+            pricePerMonth: bestMatch.pricePerMonth,
+            availableRooms: bestMatch.availableRooms,
+            averageRating: bestMatch.averageRating || 0,
+            hostelType: bestMatch.hostelType || null,
+            amenities: pickTruthyAmenities(bestMatch.amenities)
+        }
+    };
+};
+
+const buildContext = async ({ user, clientContext, userMessage }) => {
     const sanitizedClientContext = sanitizeClientContext(clientContext);
     const groundedContext = {
         ...DEFAULT_PLATFORM_CONTEXT,
@@ -252,19 +347,21 @@ const buildContext = async ({ user, clientContext }) => {
         userRole: user?.role || 'guest'
     };
 
-    const [platformSnapshot, roleSpecificContext] = await Promise.all([
+    const [platformSnapshot, roleSpecificContext, resolvedHostelContext] = await Promise.all([
         buildPlatformSnapshot(),
         user?.role === 'student'
             ? buildStudentContext(user.id)
             : user?.role === 'owner'
                 ? buildOwnerContext(user.id)
-                : Promise.resolve({ roleContext: { role: user?.role || 'guest' } })
+                : Promise.resolve({ roleContext: { role: user?.role || 'guest' } }),
+        buildResolvedHostelContext(userMessage)
     ]);
 
     return {
         ...groundedContext,
         ...platformSnapshot,
-        ...roleSpecificContext
+        ...roleSpecificContext,
+        ...resolvedHostelContext
     };
 };
 
