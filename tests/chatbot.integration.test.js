@@ -273,7 +273,11 @@ test('chatbot request includes grounded student context from backend data', { co
     assert.equal(seenPayload.context.userRole, 'student');
     assert.equal(seenPayload.context.roleContext.profile.username, 'Context Student');
     assert.equal(seenPayload.context.roleContext.favorites[0].name, 'Kirinyaga Heights');
+    assert.equal(seenPayload.context.roleContext.recentBookings[0].roomsBooked, 1);
+    assert.equal(seenPayload.context.roleContext.recentBookings[0].startDate, '2026-05-01');
     assert.equal(seenPayload.context.roleContext.recentBookings[0].paymentMethod, 'mpesa');
+    assert.equal(seenPayload.context.livePlatformSnapshot.approvedActiveHostelCount, 1);
+    assert.equal(seenPayload.context.livePlatformSnapshot.hostelsByUniversity[0].count, 1);
     assert.equal(seenPayload.context.livePlatformSnapshot.universityCoverageSample.includes('Kirinyaga University'), true);
 });
 

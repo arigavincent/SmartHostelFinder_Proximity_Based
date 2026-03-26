@@ -89,10 +89,13 @@ const buildStudentContext = async (userId) => {
             recentBookings: recentBookings.map((booking) => ({
                 bookingId: String(booking._id),
                 status: booking.status,
+                roomsBooked: booking.roomsBooked,
                 paymentStatus: booking.payment?.status || 'pending',
                 paymentMethod: booking.payment?.method || null,
                 amount: booking.amount,
                 currency: booking.currency || 'KES',
+                startDate: booking.startDate ? booking.startDate.toISOString().slice(0, 10) : null,
+                endDate: booking.endDate ? booking.endDate.toISOString().slice(0, 10) : null,
                 hostel: booking.hostel ? {
                     name: booking.hostel.name,
                     nearbyUniversity: booking.hostel.location?.nearbyUniversity || null,
@@ -163,31 +166,80 @@ const buildPlatformSnapshot = async () => {
     if (!isDatabaseReady()) {
         return {
             livePlatformSnapshot: {
+                approvedActiveHostelCount: 0,
                 approvedHostelCountSample: 0,
+                universityCoverage: [],
                 universityCoverageSample: [],
+                cityCoverage: [],
+                hostelsByUniversity: [],
+                hostelsByCity: [],
+                featuredHostels: [],
                 citiesSample: []
             }
         };
     }
 
-    const hostels = await Hostel.find({ isApproved: true, isActive: true })
-        .select('location.nearbyUniversity location.city pricePerMonth availableRooms')
-        .limit(20)
-        .lean();
+    const approvedFilter = { isApproved: true, isActive: true };
+    const [approvedActiveHostelCount, hostels, byUniversity, byCity] = await Promise.all([
+        Hostel.countDocuments(approvedFilter),
+        Hostel.find(approvedFilter)
+            .select('name location.nearbyUniversity location.city pricePerMonth availableRooms averageRating')
+            .sort({ createdAt: -1 })
+            .limit(12)
+            .lean(),
+        Hostel.aggregate([
+            { $match: approvedFilter },
+            { $match: { 'location.nearbyUniversity': { $type: 'string', $ne: '' } } },
+            { $group: { _id: '$location.nearbyUniversity', count: { $sum: 1 } } },
+            { $sort: { count: -1, _id: 1 } }
+        ]),
+        Hostel.aggregate([
+            { $match: approvedFilter },
+            { $match: { 'location.city': { $type: 'string', $ne: '' } } },
+            { $group: { _id: '$location.city', count: { $sum: 1 } } },
+            { $sort: { count: -1, _id: 1 } }
+        ])
+    ]);
 
     const universities = [...new Set(
-        hostels
-            .map((hostel) => hostel.location?.nearbyUniversity)
+        byUniversity
+            .map((entry) => entry._id)
             .filter(Boolean)
-    )].slice(0, 10);
+    )];
+    const cities = [...new Set(
+        byCity
+            .map((entry) => entry._id)
+            .filter(Boolean)
+    )];
 
     return {
         livePlatformSnapshot: {
-            approvedHostelCountSample: hostels.length,
-            universityCoverageSample: universities,
-            citiesSample: [...new Set(
-                hostels.map((hostel) => hostel.location?.city).filter(Boolean)
-            )].slice(0, 10)
+            approvedActiveHostelCount,
+            approvedHostelCountSample: approvedActiveHostelCount,
+            universityCoverage: universities,
+            universityCoverageSample: universities.slice(0, 10),
+            cityCoverage: cities,
+            citiesSample: cities.slice(0, 10),
+            hostelsByUniversity: byUniversity
+                .slice(0, 20)
+                .map((entry) => ({
+                    university: entry._id,
+                    count: entry.count
+                })),
+            hostelsByCity: byCity
+                .slice(0, 20)
+                .map((entry) => ({
+                    city: entry._id,
+                    count: entry.count
+                })),
+            featuredHostels: hostels.map((hostel) => ({
+                name: hostel.name,
+                nearbyUniversity: hostel.location?.nearbyUniversity || null,
+                city: hostel.location?.city || null,
+                pricePerMonth: hostel.pricePerMonth,
+                availableRooms: hostel.availableRooms,
+                averageRating: hostel.averageRating || 0
+            }))
         }
     };
 };
