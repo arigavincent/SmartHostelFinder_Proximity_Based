@@ -281,7 +281,7 @@ test('chatbot request includes grounded student context from backend data', { co
     assert.equal(seenPayload.context.livePlatformSnapshot.universityCoverageSample.includes('Kirinyaga University'), true);
 });
 
-test('chatbot request resolves a public hostel match for hostel detail questions', { concurrency: false }, async (t) => {
+test('chatbot request resolves a public hostel match for named hostel questions', { concurrency: false }, async (t) => {
     const owner = await Owner.create({
         username: 'Riverside Owner',
         email: 'riverside-owner@test.local',
@@ -332,7 +332,7 @@ test('chatbot request resolves a public hostel match for hostel detail questions
     const response = await request(app)
         .post('/api/chatbot/message')
         .send({
-            message: 'What can you tell me about this Riverside hostel?'
+            message: 'Are there rooms available at Riverside Executive Suites?'
         });
 
     assert.equal(response.status, 200);

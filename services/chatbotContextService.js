@@ -157,10 +157,18 @@ const buildOwnerContext = async (userId) => {
     }
 
     const hostels = await Hostel.find({ owner: userId })
-        .select('name location.nearbyUniversity location.city pricePerMonth availableRooms isApproved isActive amenities')
+        .select('name location.nearbyUniversity location.city pricePerMonth totalRooms availableRooms isApproved isActive amenities')
         .sort({ createdAt: -1 })
         .limit(5)
         .lean();
+
+    const ownerStats = {
+        totalHostels: hostels.length,
+        approvedHostels: hostels.filter((hostel) => hostel.isApproved).length,
+        pendingHostels: hostels.filter((hostel) => !hostel.isApproved).length,
+        availableRooms: hostels.reduce((sum, hostel) => sum + Number(hostel.availableRooms || 0), 0),
+        totalRooms: hostels.reduce((sum, hostel) => sum + Number(hostel.totalRooms || 0), 0)
+    };
 
     return {
         roleContext: {
@@ -174,16 +182,70 @@ const buildOwnerContext = async (userId) => {
                 isSuspended: Boolean(owner.isSuspended),
                 verificationStatus: owner.verification?.status || 'not_submitted'
             },
+            stats: ownerStats,
             hostels: hostels.map((hostel) => ({
                 name: hostel.name,
                 nearbyUniversity: hostel.location?.nearbyUniversity || null,
                 city: hostel.location?.city || null,
                 pricePerMonth: hostel.pricePerMonth,
+                totalRooms: hostel.totalRooms,
                 availableRooms: hostel.availableRooms,
                 isApproved: Boolean(hostel.isApproved),
                 isActive: Boolean(hostel.isActive),
                 amenities: pickTruthyAmenities(hostel.amenities)
             }))
+        }
+    };
+};
+
+const buildAdminContext = async () => {
+    if (!isDatabaseReady()) {
+        return {
+            roleContext: {
+                role: 'admin',
+                dashboardStats: {
+                    totalStudents: 0,
+                    totalOwners: 0,
+                    approvedOwners: 0,
+                    pendingOwners: 0,
+                    totalHostels: 0,
+                    approvedHostels: 0,
+                    pendingHostels: 0
+                }
+            }
+        };
+    }
+
+    const [
+        totalStudents,
+        totalOwners,
+        approvedOwners,
+        pendingOwners,
+        totalHostels,
+        approvedHostels,
+        pendingHostels
+    ] = await Promise.all([
+        Student.countDocuments(),
+        Owner.countDocuments(),
+        Owner.countDocuments({ isApproved: true }),
+        Owner.countDocuments({ 'verification.status': 'submitted' }),
+        Hostel.countDocuments(),
+        Hostel.countDocuments({ isApproved: true }),
+        Hostel.countDocuments({ isApproved: false })
+    ]);
+
+    return {
+        roleContext: {
+            role: 'admin',
+            dashboardStats: {
+                totalStudents,
+                totalOwners,
+                approvedOwners,
+                pendingOwners,
+                totalHostels,
+                approvedHostels,
+                pendingHostels
+            }
         }
     };
 };
@@ -301,7 +363,7 @@ const scoreHostelNameMatch = (message, hostelName) => {
 
 const buildResolvedHostelContext = async (message) => {
     const normalizedMessage = normalizeSearchText(message);
-    if (!isDatabaseReady() || !normalizedMessage || !normalizedMessage.includes('hostel')) {
+    if (!isDatabaseReady() || !normalizedMessage) {
         return {};
     }
 
@@ -353,6 +415,8 @@ const buildContext = async ({ user, clientContext, userMessage }) => {
             ? buildStudentContext(user.id)
             : user?.role === 'owner'
                 ? buildOwnerContext(user.id)
+                : user?.role === 'admin'
+                    ? buildAdminContext()
                 : Promise.resolve({ roleContext: { role: user?.role || 'guest' } }),
         buildResolvedHostelContext(userMessage)
     ]);
