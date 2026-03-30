@@ -11,6 +11,7 @@ const SupportTicket = require('../models/SupportTicket');
 const DEFAULT_PLATFORM_CONTEXT = {
     app: 'Smart Hostel Finder',
     primaryUniversity: 'Kirinyaga University',
+    universityAliases: ['KyU', 'Kirinyaga University'],
     primaryUniversityNote: 'Kirinyaga University is the main test university for this system, but the assistant can still discuss other universities generally.',
     supportedCapabilities: [
         'hostel_search_guidance',
@@ -49,6 +50,21 @@ const STOP_TOKENS = new Set([
     'me'
 ]);
 
+const SEARCH_TOKENS = [
+    'show',
+    'find',
+    'list',
+    'which',
+    'search',
+    'near',
+    'nearby',
+    'available',
+    'availability',
+    'vacancy',
+    'vacancies',
+    'compare'
+];
+
 const pickTruthyAmenities = (amenities = {}) => Object.entries(amenities)
     .filter(([, value]) => Boolean(value))
     .map(([key]) => key);
@@ -80,6 +96,18 @@ const summarizePriceBand = (values = []) => {
     };
 };
 
+const buildPublicHostelSummary = (hostel) => ({
+    name: hostel.name,
+    description: hostel.description,
+    nearbyUniversity: hostel.location?.nearbyUniversity || null,
+    city: hostel.location?.city || null,
+    pricePerMonth: hostel.pricePerMonth,
+    availableRooms: hostel.availableRooms,
+    averageRating: hostel.averageRating || 0,
+    hostelType: hostel.hostelType || null,
+    amenities: pickTruthyAmenities(hostel.amenities)
+});
+
 const isDatabaseReady = () => mongoose.connection.readyState === 1;
 
 const sanitizeClientContext = (context) => {
@@ -89,6 +117,27 @@ const sanitizeClientContext = (context) => {
 
     return { ...context };
 };
+
+const findMatchingLabel = (normalizedMessage, labels = [], aliasesByLabel = new Map()) => {
+    for (const label of labels) {
+        if (!label || typeof label !== 'string') {
+            continue;
+        }
+
+        const candidates = new Set([normalizeSearchText(label)]);
+        for (const alias of aliasesByLabel.get(label) || []) {
+            candidates.add(normalizeSearchText(alias));
+        }
+
+        if ([...candidates].some((candidate) => candidate && normalizedMessage.includes(candidate))) {
+            return label;
+        }
+    }
+
+    return null;
+};
+
+const hasSearchIntent = (normalizedMessage) => SEARCH_TOKENS.some((token) => normalizedMessage.includes(token));
 
 const buildStudentContext = async (userId) => {
     if (!isDatabaseReady() || !mongoose.isValidObjectId(userId)) {
@@ -491,12 +540,7 @@ const buildPlatformSnapshot = async () => {
                     count: entry.count
                 })),
             featuredHostels: hostels.map((hostel) => ({
-                name: hostel.name,
-                nearbyUniversity: hostel.location?.nearbyUniversity || null,
-                city: hostel.location?.city || null,
-                pricePerMonth: hostel.pricePerMonth,
-                availableRooms: hostel.availableRooms,
-                averageRating: hostel.averageRating || 0
+                ...buildPublicHostelSummary(hostel)
             }))
         }
     };
@@ -557,19 +601,100 @@ const buildResolvedHostelContext = async (message) => {
     }
 
     return {
-        resolvedHostelMatch: {
-            name: bestMatch.name,
-            description: bestMatch.description,
-            nearbyUniversity: bestMatch.location?.nearbyUniversity || null,
-            city: bestMatch.location?.city || null,
-            pricePerMonth: bestMatch.pricePerMonth,
-            availableRooms: bestMatch.availableRooms,
-            averageRating: bestMatch.averageRating || 0,
-            hostelType: bestMatch.hostelType || null,
-            amenities: pickTruthyAmenities(bestMatch.amenities)
-        }
+        resolvedHostelMatch: buildPublicHostelSummary(bestMatch)
     };
 };
+
+const buildMatchedHostelsContext = async (message, context = {}) => {
+    const normalizedMessage = normalizeSearchText(message);
+    if (!isDatabaseReady() || !normalizedMessage) {
+        return {};
+    }
+
+    const publicHostels = await Hostel.find({ isApproved: true, isActive: true })
+        .select('name description location.nearbyUniversity location.city pricePerMonth availableRooms averageRating amenities hostelType')
+        .limit(150)
+        .lean();
+
+    const availableUniversities = [...new Set(
+        publicHostels
+            .map((hostel) => hostel.location?.nearbyUniversity)
+            .filter((value) => typeof value === 'string' && value.trim())
+    )];
+    const availableCities = [...new Set(
+        publicHostels
+            .map((hostel) => hostel.location?.city)
+            .filter((value) => typeof value === 'string' && value.trim())
+    )];
+
+    const aliasMap = new Map();
+    const primaryUniversity = typeof context.primaryUniversity === 'string' ? context.primaryUniversity : null;
+    const contextAliases = Array.isArray(context.universityAliases)
+        ? context.universityAliases.filter((value) => typeof value === 'string' && value.trim())
+        : [];
+    if (primaryUniversity) {
+        aliasMap.set(primaryUniversity, contextAliases);
+    }
+
+    const targetUniversity = findMatchingLabel(normalizedMessage, availableUniversities, aliasMap);
+    const targetCity = findMatchingLabel(normalizedMessage, availableCities);
+    const availableOnly = containsAnyToken(normalizedMessage, ['available', 'availability', 'vacancy', 'vacancies', 'open rooms']);
+
+    if (!hasSearchIntent(normalizedMessage) && !targetUniversity && !targetCity) {
+        return {};
+    }
+
+    const matches = publicHostels
+        .filter((hostel) => {
+            if (targetUniversity && hostel.location?.nearbyUniversity !== targetUniversity) {
+                return false;
+            }
+            if (targetCity && hostel.location?.city !== targetCity) {
+                return false;
+            }
+            if (availableOnly && Number(hostel.availableRooms || 0) <= 0) {
+                return false;
+            }
+            return true;
+        })
+        .sort((left, right) => {
+            const leftRooms = Number(left.availableRooms || 0);
+            const rightRooms = Number(right.availableRooms || 0);
+            if (rightRooms !== leftRooms) {
+                return rightRooms - leftRooms;
+            }
+
+            const leftRating = Number(left.averageRating || 0);
+            const rightRating = Number(right.averageRating || 0);
+            if (rightRating !== leftRating) {
+                return rightRating - leftRating;
+            }
+
+            const leftPrice = Number(left.pricePerMonth || Number.MAX_SAFE_INTEGER);
+            const rightPrice = Number(right.pricePerMonth || Number.MAX_SAFE_INTEGER);
+            if (leftPrice !== rightPrice) {
+                return leftPrice - rightPrice;
+            }
+
+            return String(left.name || '').localeCompare(String(right.name || ''));
+        });
+
+    if (!targetUniversity && !targetCity && !availableOnly && matches.length === 0) {
+        return {};
+    }
+
+    return {
+        matchedHostelQuery: {
+            university: targetUniversity,
+            city: targetCity,
+            availableOnly,
+            totalMatches: matches.length
+        },
+        matchedHostels: matches.slice(0, 6).map(buildPublicHostelSummary)
+    };
+};
+
+const containsAnyToken = (text, tokens) => tokens.some((token) => text.includes(token));
 
 const buildContext = async ({ user, clientContext, userMessage }) => {
     const sanitizedClientContext = sanitizeClientContext(clientContext);
@@ -579,7 +704,7 @@ const buildContext = async ({ user, clientContext, userMessage }) => {
         userRole: user?.role || 'guest'
     };
 
-    const [platformSnapshot, roleSpecificContext, resolvedHostelContext] = await Promise.all([
+    const [platformSnapshot, roleSpecificContext, resolvedHostelContext, matchedHostelsContext] = await Promise.all([
         buildPlatformSnapshot(),
         user?.role === 'student'
             ? buildStudentContext(user.id)
@@ -588,14 +713,16 @@ const buildContext = async ({ user, clientContext, userMessage }) => {
                 : user?.role === 'admin'
                     ? buildAdminContext()
                 : Promise.resolve({ roleContext: { role: user?.role || 'guest' } }),
-        buildResolvedHostelContext(userMessage)
+        buildResolvedHostelContext(userMessage),
+        buildMatchedHostelsContext(userMessage, groundedContext)
     ]);
 
     return {
         ...groundedContext,
         ...platformSnapshot,
         ...roleSpecificContext,
-        ...resolvedHostelContext
+        ...resolvedHostelContext,
+        ...matchedHostelsContext
     };
 };
 

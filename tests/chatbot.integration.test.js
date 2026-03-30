@@ -358,6 +358,114 @@ test('chatbot request resolves a public hostel match for named hostel questions'
     assert.equal(seenPayload.context.resolvedHostelMatch.amenities.includes('wifi'), true);
 });
 
+test('chatbot request adds matched hostels for university listing prompts', { concurrency: false }, async (t) => {
+    const owner = await Owner.create({
+        username: 'Listing Owner',
+        email: 'listing-owner@test.local',
+        password: await hashPassword('Passw0rd'),
+        role: 'owner',
+        isEmailVerified: true,
+        isApproved: true,
+        businessLicense: 'private/documents/listing-license.pdf'
+    });
+
+    await Hostel.create([
+        {
+            name: 'Riverside Executive Suites',
+            description: 'Modern rooms near campus.',
+            owner: owner._id,
+            location: {
+                type: 'Point',
+                coordinates: [37.2783, -0.4989],
+                address: 'Kutus',
+                city: 'Kerugoya',
+                nearbyUniversity: 'Kirinyaga University'
+            },
+            pricePerMonth: 9200,
+            hostelType: 'mixed',
+            totalRooms: 30,
+            availableRooms: 5,
+            amenities: { wifi: true, water: true, security: true },
+            images: [],
+            isApproved: true,
+            isActive: true,
+            contactPhone: '0712345678',
+            contactEmail: owner.email
+        },
+        {
+            name: 'Campus View Residency',
+            description: 'Affordable rooms close to campus.',
+            owner: owner._id,
+            location: {
+                type: 'Point',
+                coordinates: [37.2790, -0.4980],
+                address: 'Kerugoya',
+                city: 'Kerugoya',
+                nearbyUniversity: 'Kirinyaga University'
+            },
+            pricePerMonth: 7600,
+            hostelType: 'female',
+            totalRooms: 18,
+            availableRooms: 2,
+            amenities: { wifi: true, laundry: true },
+            images: [],
+            isApproved: true,
+            isActive: true,
+            contactPhone: '0712345679',
+            contactEmail: owner.email
+        },
+        {
+            name: 'Kisii Corner Hostel',
+            description: 'Another university listing.',
+            owner: owner._id,
+            location: {
+                type: 'Point',
+                coordinates: [34.7617, -0.6817],
+                address: 'Kisii',
+                city: 'Kisii',
+                nearbyUniversity: 'Kisii University'
+            },
+            pricePerMonth: 6800,
+            hostelType: 'mixed',
+            totalRooms: 20,
+            availableRooms: 6,
+            amenities: { water: true, security: true },
+            images: [],
+            isApproved: true,
+            isActive: true,
+            contactPhone: '0712345680',
+            contactEmail: owner.email
+        }
+    ]);
+
+    let seenPayload = null;
+    t.mock.method(axios, 'post', async (url, payload) => {
+        seenPayload = payload;
+        return {
+            data: {
+                reply: 'Grounded listing reply',
+                model: 'gemini-2.5-flash',
+                provider: 'gemini',
+                usedStub: false,
+                suggestions: []
+            }
+        };
+    });
+
+    const response = await request(app)
+        .post('/api/chatbot/message')
+        .send({
+            message: 'Show hostels near Kirinyaga University'
+        });
+
+    assert.equal(response.status, 200);
+    assert.equal(seenPayload.context.matchedHostelQuery.university, 'Kirinyaga University');
+    assert.equal(seenPayload.context.matchedHostelQuery.totalMatches, 2);
+    assert.equal(seenPayload.context.matchedHostels.length, 2);
+    assert.equal(seenPayload.context.matchedHostels[0].name, 'Riverside Executive Suites');
+    assert.equal(seenPayload.context.matchedHostels[1].name, 'Campus View Residency');
+});
+
 test('chatbot session fetch is blocked for a different authenticated user', { concurrency: false }, async () => {
     const owner = await Student.create({
         username: 'Session Owner',
