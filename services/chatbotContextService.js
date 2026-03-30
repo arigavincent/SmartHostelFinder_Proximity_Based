@@ -1,9 +1,12 @@
 const mongoose = require('mongoose');
 
 const Booking = require('../models/Booking');
+const Complaint = require('../models/Complaint');
 const Hostel = require('../models/Hostel');
 const Owner = require('../models/Owners');
+const PaymentTransaction = require('../models/PaymentTransaction');
 const Student = require('../models/Students');
+const SupportTicket = require('../models/SupportTicket');
 
 const DEFAULT_PLATFORM_CONTEXT = {
     app: 'Smart Hostel Finder',
@@ -50,6 +53,33 @@ const pickTruthyAmenities = (amenities = {}) => Object.entries(amenities)
     .filter(([, value]) => Boolean(value))
     .map(([key]) => key);
 
+const topValues = (values = [], limit = 3) => {
+    const counts = new Map();
+    for (const value of values.filter(Boolean)) {
+        counts.set(value, (counts.get(value) || 0) + 1);
+    }
+
+    return [...counts.entries()]
+        .sort((a, b) => b[1] - a[1] || String(a[0]).localeCompare(String(b[0])))
+        .slice(0, limit)
+        .map(([value, count]) => ({ value, count }));
+};
+
+const summarizePriceBand = (values = []) => {
+    const prices = values
+        .map((value) => Number(value))
+        .filter((value) => Number.isFinite(value) && value > 0);
+
+    if (prices.length === 0) {
+        return null;
+    }
+
+    return {
+        min: Math.min(...prices),
+        max: Math.max(...prices)
+    };
+};
+
 const isDatabaseReady = () => mongoose.connection.readyState === 1;
 
 const sanitizeClientContext = (context) => {
@@ -88,11 +118,41 @@ const buildStudentContext = async (userId) => {
 
     const recentBookings = await Booking.find({ student: userId })
         .sort({ createdAt: -1 })
-        .limit(3)
+        .limit(5)
         .populate({
             path: 'hostel',
             select: 'name location.nearbyUniversity location.city pricePerMonth'
         });
+
+    const recentPayments = await PaymentTransaction.find({ student: userId })
+        .sort({ createdAt: -1 })
+        .limit(5)
+        .select('provider status amount currency failureReason booking createdAt')
+        .lean();
+
+    const favoriteCities = (student.favorites || []).map((hostel) => hostel.location?.city).filter(Boolean);
+    const favoriteUniversities = (student.favorites || []).map((hostel) => hostel.location?.nearbyUniversity).filter(Boolean);
+    const favoritePrices = (student.favorites || []).map((hostel) => hostel.pricePerMonth);
+    const bookingPrices = recentBookings.map((booking) => booking.hostel?.pricePerMonth).filter(Boolean);
+
+    const bookingActionSummary = {
+        totalRecentBookings: recentBookings.length,
+        pendingPaymentBookings: recentBookings.filter((booking) => booking.status === 'pending_payment').length,
+        confirmedBookings: recentBookings.filter((booking) => booking.status === 'confirmed').length,
+        cancellableBookings: recentBookings.filter((booking) => booking.status !== 'cancelled').length,
+        failedPaymentBookings: recentBookings.filter((booking) => booking.payment?.status === 'failed').length
+    };
+
+    const nextActions = [];
+    if (bookingActionSummary.pendingPaymentBookings > 0) {
+        nextActions.push('complete_payment_confirmation');
+    }
+    if (bookingActionSummary.failedPaymentBookings > 0) {
+        nextActions.push('retry_or_verify_failed_payment');
+    }
+    if (bookingActionSummary.cancellableBookings > 0) {
+        nextActions.push('review_active_bookings_for_cancellation');
+    }
 
     return {
         roleContext: {
@@ -128,6 +188,22 @@ const buildStudentContext = async (userId) => {
                     city: booking.hostel.location?.city || null,
                     pricePerMonth: booking.hostel.pricePerMonth
                 } : null
+            })),
+            bookingActionSummary,
+            recommendationSignals: {
+                preferredCities: topValues(favoriteCities, 3),
+                preferredUniversities: topValues(favoriteUniversities, 3),
+                priceBand: summarizePriceBand([...favoritePrices, ...bookingPrices]),
+                nextActions
+            },
+            recentPayments: recentPayments.map((payment) => ({
+                bookingId: payment.booking ? String(payment.booking) : null,
+                provider: payment.provider,
+                status: payment.status,
+                amount: payment.amount,
+                currency: payment.currency || 'KES',
+                failureReason: payment.failureReason || null,
+                createdAt: payment.createdAt ? payment.createdAt.toISOString() : null
             }))
         }
     };
@@ -159,15 +235,28 @@ const buildOwnerContext = async (userId) => {
     const hostels = await Hostel.find({ owner: userId })
         .select('name location.nearbyUniversity location.city pricePerMonth totalRooms availableRooms isApproved isActive amenities')
         .sort({ createdAt: -1 })
-        .limit(5)
+        .lean();
+
+    const recentOwnerBookings = await Booking.find({ owner: userId })
+        .sort({ createdAt: -1 })
+        .limit(10)
+        .populate({
+            path: 'hostel',
+            select: 'name'
+        })
         .lean();
 
     const ownerStats = {
         totalHostels: hostels.length,
         approvedHostels: hostels.filter((hostel) => hostel.isApproved).length,
         pendingHostels: hostels.filter((hostel) => !hostel.isApproved).length,
+        inactiveHostels: hostels.filter((hostel) => !hostel.isActive).length,
+        lowAvailabilityHostels: hostels.filter((hostel) => Number(hostel.availableRooms || 0) > 0 && Number(hostel.availableRooms || 0) <= 2).length,
+        zeroRoomHostels: hostels.filter((hostel) => Number(hostel.availableRooms || 0) === 0).length,
         availableRooms: hostels.reduce((sum, hostel) => sum + Number(hostel.availableRooms || 0), 0),
-        totalRooms: hostels.reduce((sum, hostel) => sum + Number(hostel.totalRooms || 0), 0)
+        totalRooms: hostels.reduce((sum, hostel) => sum + Number(hostel.totalRooms || 0), 0),
+        recentBookings: recentOwnerBookings.length,
+        pendingPaymentBookings: recentOwnerBookings.filter((booking) => booking.status === 'pending_payment').length
     };
 
     return {
@@ -183,7 +272,7 @@ const buildOwnerContext = async (userId) => {
                 verificationStatus: owner.verification?.status || 'not_submitted'
             },
             stats: ownerStats,
-            hostels: hostels.map((hostel) => ({
+            hostels: hostels.slice(0, 8).map((hostel) => ({
                 name: hostel.name,
                 nearbyUniversity: hostel.location?.nearbyUniversity || null,
                 city: hostel.location?.city || null,
@@ -193,7 +282,43 @@ const buildOwnerContext = async (userId) => {
                 isApproved: Boolean(hostel.isApproved),
                 isActive: Boolean(hostel.isActive),
                 amenities: pickTruthyAmenities(hostel.amenities)
-            }))
+            })),
+            hostelsNeedingAttention: {
+                pendingApproval: hostels
+                    .filter((hostel) => !hostel.isApproved)
+                    .slice(0, 5)
+                    .map((hostel) => hostel.name),
+                inactive: hostels
+                    .filter((hostel) => !hostel.isActive)
+                    .slice(0, 5)
+                    .map((hostel) => hostel.name),
+                lowAvailability: hostels
+                    .filter((hostel) => Number(hostel.availableRooms || 0) > 0 && Number(hostel.availableRooms || 0) <= 2)
+                    .slice(0, 5)
+                    .map((hostel) => ({
+                        name: hostel.name,
+                        availableRooms: hostel.availableRooms
+                    })),
+                zeroRooms: hostels
+                    .filter((hostel) => Number(hostel.availableRooms || 0) === 0)
+                    .slice(0, 5)
+                    .map((hostel) => hostel.name)
+            },
+            recentBookingSummary: {
+                confirmed: recentOwnerBookings.filter((booking) => booking.status === 'confirmed').length,
+                pendingPayment: recentOwnerBookings.filter((booking) => booking.status === 'pending_payment').length,
+                cancelled: recentOwnerBookings.filter((booking) => booking.status === 'cancelled').length
+            },
+            releasableReservations: recentOwnerBookings
+                .filter((booking) => booking.status === 'pending_payment' && booking.payment?.status !== 'paid')
+                .slice(0, 5)
+                .map((booking) => ({
+                    bookingId: String(booking._id),
+                    hostelName: booking.hostel?.name || null,
+                    paymentStatus: booking.payment?.status || 'pending',
+                    amount: booking.amount,
+                    currency: booking.currency || 'KES'
+                }))
         }
     };
 };
@@ -223,7 +348,14 @@ const buildAdminContext = async () => {
         pendingOwners,
         totalHostels,
         approvedHostels,
-        pendingHostels
+        pendingHostels,
+        openTickets,
+        inProgressTickets,
+        openComplaints,
+        investigatingComplaints,
+        recentHostels,
+        pendingOwnerQueue,
+        pendingHostelQueue
     ] = await Promise.all([
         Student.countDocuments(),
         Owner.countDocuments(),
@@ -231,7 +363,22 @@ const buildAdminContext = async () => {
         Owner.countDocuments({ 'verification.status': 'submitted' }),
         Hostel.countDocuments(),
         Hostel.countDocuments({ isApproved: true }),
-        Hostel.countDocuments({ isApproved: false })
+        Hostel.countDocuments({ isApproved: false }),
+        SupportTicket.countDocuments({ status: 'open' }),
+        SupportTicket.countDocuments({ status: 'in_progress' }),
+        Complaint.countDocuments({ status: 'open' }),
+        Complaint.countDocuments({ status: 'investigating' }),
+        Hostel.find().sort({ createdAt: -1 }).limit(5).select('name isApproved isActive createdAt').lean(),
+        Owner.find({ 'verification.status': 'submitted' })
+            .sort({ createdAt: 1 })
+            .limit(5)
+            .select('username email verification.submittedAt')
+            .lean(),
+        Hostel.find({ isApproved: false })
+            .sort({ createdAt: 1 })
+            .limit(5)
+            .select('name createdAt')
+            .lean()
     ]);
 
     return {
@@ -245,6 +392,29 @@ const buildAdminContext = async () => {
                 totalHostels,
                 approvedHostels,
                 pendingHostels
+            },
+            moderationSummary: {
+                openTickets,
+                inProgressTickets,
+                openComplaints,
+                investigatingComplaints
+            },
+            recentHostels: recentHostels.map((hostel) => ({
+                name: hostel.name,
+                isApproved: Boolean(hostel.isApproved),
+                isActive: Boolean(hostel.isActive),
+                createdAt: hostel.createdAt ? hostel.createdAt.toISOString() : null
+            })),
+            pendingQueues: {
+                owners: pendingOwnerQueue.map((owner) => ({
+                    username: owner.username,
+                    email: owner.email,
+                    submittedAt: owner.verification?.submittedAt ? owner.verification.submittedAt.toISOString() : null
+                })),
+                hostels: pendingHostelQueue.map((hostel) => ({
+                    name: hostel.name,
+                    createdAt: hostel.createdAt ? hostel.createdAt.toISOString() : null
+                }))
             }
         }
     };

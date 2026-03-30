@@ -13,6 +13,7 @@ const { createApp } = require('../app');
 const ChatSession = require('../models/ChatSession');
 const Hostel = require('../models/Hostel');
 const Owner = require('../models/Owners');
+const PaymentTransaction = require('../models/PaymentTransaction');
 const Student = require('../models/Students');
 const Booking = require('../models/Booking');
 const { hashPassword } = require('../helpers/passwordHelper');
@@ -244,6 +245,18 @@ test('chatbot request includes grounded student context from backend data', { co
         }
     });
 
+    await PaymentTransaction.create({
+        booking: (await Booking.findOne({ student: student._id }).select('_id'))._id,
+        student: student._id,
+        owner: owner._id,
+        provider: 'mpesa',
+        amount: 8500,
+        currency: 'KES',
+        status: 'pending',
+        idempotencyKey: 'payment-context-1',
+        failureReason: ''
+    });
+
     let seenPayload = null;
     t.mock.method(axios, 'post', async (url, payload) => {
         seenPayload = payload;
@@ -276,6 +289,10 @@ test('chatbot request includes grounded student context from backend data', { co
     assert.equal(seenPayload.context.roleContext.recentBookings[0].roomsBooked, 1);
     assert.equal(seenPayload.context.roleContext.recentBookings[0].startDate, '2026-05-01');
     assert.equal(seenPayload.context.roleContext.recentBookings[0].paymentMethod, 'mpesa');
+    assert.equal(seenPayload.context.roleContext.bookingActionSummary.pendingPaymentBookings, 1);
+    assert.equal(seenPayload.context.roleContext.recommendationSignals.preferredCities[0].value, 'Kerugoya');
+    assert.equal(seenPayload.context.roleContext.recommendationSignals.priceBand.max, 8500);
+    assert.equal(seenPayload.context.roleContext.recentPayments[0].status, 'pending');
     assert.equal(seenPayload.context.livePlatformSnapshot.approvedActiveHostelCount, 1);
     assert.equal(seenPayload.context.livePlatformSnapshot.hostelsByUniversity[0].count, 1);
     assert.equal(seenPayload.context.livePlatformSnapshot.universityCoverageSample.includes('Kirinyaga University'), true);
