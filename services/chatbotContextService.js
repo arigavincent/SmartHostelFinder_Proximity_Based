@@ -480,6 +480,7 @@ const buildPlatformSnapshot = async () => {
                 cityCoverage: [],
                 hostelsByUniversity: [],
                 hostelsByCity: [],
+                cheapestHostel: null,
                 featuredHostels: [],
                 citiesSample: []
             }
@@ -487,7 +488,7 @@ const buildPlatformSnapshot = async () => {
     }
 
     const approvedFilter = { isApproved: true, isActive: true };
-    const [approvedActiveHostelCount, hostels, byUniversity, byCity] = await Promise.all([
+    const [approvedActiveHostelCount, hostels, byUniversity, byCity, cheapestHostel] = await Promise.all([
         Hostel.countDocuments(approvedFilter),
         Hostel.find(approvedFilter)
             .select('name location.nearbyUniversity location.city pricePerMonth availableRooms averageRating')
@@ -505,7 +506,11 @@ const buildPlatformSnapshot = async () => {
             { $match: { 'location.city': { $type: 'string', $ne: '' } } },
             { $group: { _id: '$location.city', count: { $sum: 1 } } },
             { $sort: { count: -1, _id: 1 } }
-        ])
+        ]),
+        Hostel.findOne(approvedFilter)
+            .select('name description location.nearbyUniversity location.city pricePerMonth availableRooms averageRating amenities hostelType')
+            .sort({ pricePerMonth: 1, availableRooms: -1, averageRating: -1, createdAt: -1 })
+            .lean()
     ]);
 
     const universities = [...new Set(
@@ -539,6 +544,7 @@ const buildPlatformSnapshot = async () => {
                     city: entry._id,
                     count: entry.count
                 })),
+            cheapestHostel: cheapestHostel ? buildPublicHostelSummary(cheapestHostel) : null,
             featuredHostels: hostels.map((hostel) => ({
                 ...buildPublicHostelSummary(hostel)
             }))

@@ -296,6 +296,8 @@ test('chatbot request includes grounded student context from backend data', { co
     assert.equal(seenPayload.context.livePlatformSnapshot.approvedActiveHostelCount, 1);
     assert.equal(seenPayload.context.livePlatformSnapshot.hostelsByUniversity[0].count, 1);
     assert.equal(seenPayload.context.livePlatformSnapshot.universityCoverageSample.includes('Kirinyaga University'), true);
+    assert.equal(seenPayload.context.livePlatformSnapshot.cheapestHostel.name, 'Kirinyaga Heights');
+    assert.equal(seenPayload.context.livePlatformSnapshot.cheapestHostel.pricePerMonth, 8500);
 });
 
 test('chatbot request resolves a public hostel match for named hostel questions', { concurrency: false }, async (t) => {
