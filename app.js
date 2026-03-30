@@ -22,6 +22,7 @@ const createApp = (env) => {
     app.locals.env = env;
 
     app.disable('x-powered-by');
+    app.disable('etag');
     if (env.trustProxy) {
         app.set('trust proxy', 1);
     }
@@ -85,6 +86,15 @@ const createApp = (env) => {
         crossOriginResourcePolicy: { policy: 'cross-origin' }
     }));
     app.use(cors(corsOptions));
+    app.use((req, res, next) => {
+        if (req.path.startsWith('/api/')) {
+            res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+            res.setHeader('Pragma', 'no-cache');
+            res.setHeader('Expires', '0');
+            res.setHeader('Surrogate-Control', 'no-store');
+        }
+        next();
+    });
     app.use(globalRateLimiter);
     app.use(express.json({ limit: env.bodyLimit }));
     app.use(express.urlencoded({ extended: true, limit: env.bodyLimit }));
