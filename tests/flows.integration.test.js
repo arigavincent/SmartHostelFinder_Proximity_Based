@@ -311,6 +311,54 @@ test('owner can fetch their own pending hostel for editing', async () => {
     assert.equal(response.body.name, 'Pending Edit Hostel');
 });
 
+test('owner can delete a hostel image using the public image URL', async () => {
+    const owner = await Owner.create({
+        username: 'Image Delete Owner',
+        email: 'image-delete-owner@test.local',
+        password: await hashPassword('Passw0rd'),
+        role: 'owner',
+        isEmailVerified: true,
+        isApproved: true,
+        businessLicense: 'private/documents/image-delete-license.pdf'
+    });
+
+    const hostel = await Hostel.create({
+        name: 'Image Delete Hostel',
+        description: 'Hostel with stored image keys',
+        owner: owner._id,
+        location: {
+            type: 'Point',
+            coordinates: [37.2783, -0.4989],
+            address: 'Kutus',
+            city: 'Kerugoya',
+            nearbyUniversity: 'Kirinyaga University'
+        },
+        pricePerMonth: 8200,
+        hostelType: 'mixed',
+        totalRooms: 10,
+        availableRooms: 4,
+        amenities: { wifi: true },
+        images: ['public/images/test-owner/sample-photo.jpg'],
+        isApproved: false,
+        isActive: true,
+        contactPhone: '0712345678',
+        contactEmail: owner.email
+    });
+
+    const ownerToken = signToken(owner);
+    const publicImageUrl = 'http://localhost:5100/api/storage/public?key=public%2Fimages%2Ftest-owner%2Fsample-photo.jpg';
+
+    const response = await request(app)
+        .delete(`/api/hostels/${hostel._id}/images?url=${encodeURIComponent(publicImageUrl)}`)
+        .set('Authorization', `Bearer ${ownerToken}`);
+
+    assert.equal(response.status, 200);
+    assert.deepEqual(response.body.images, []);
+
+    const refreshedHostel = await Hostel.findById(hostel._id);
+    assert.deepEqual(refreshedHostel.images, []);
+});
+
 test('owner verification submission can be reviewed by admin and queues approval email', async () => {
     const admin = await Admin.create({
         username: 'Admin User',

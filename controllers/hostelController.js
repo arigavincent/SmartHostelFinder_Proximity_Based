@@ -450,6 +450,7 @@ exports.uploadHostelImages = async (req, res) => {
 exports.deleteHostelImage = async (req, res) => {
     try {
         const imageUrl = String(req.query.url || '').trim();
+        const requestedImageKey = extractStorageKey(imageUrl);
         if (!imageUrl) {
             return res.status(400).json({ message: 'Image url is required.' });
         }
@@ -464,7 +465,11 @@ exports.deleteHostelImage = async (req, res) => {
             return res.status(403).json({ message: 'Not authorized to update this hostel.' });
         }
 
-        const existingImage = hostel.images.find((image) => image === imageUrl);
+        const existingImage = hostel.images.find((image) => {
+            if (image === imageUrl) return true;
+            if (!requestedImageKey) return false;
+            return extractStorageKey(image) === requestedImageKey;
+        });
         if (!existingImage) {
             return res.status(404).json({ message: 'Image not found on this hostel.' });
         }
