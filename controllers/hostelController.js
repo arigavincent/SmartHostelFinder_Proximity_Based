@@ -13,7 +13,13 @@ const uploadToCloudinary = (buffer, folder = 'hostels') =>
     new Promise((resolve, reject) => {
         const stream = cloudinary.uploader.upload_stream(
             { folder, resource_type: 'image' },
-            (err, result) => (err ? reject(err) : resolve(result.secure_url))
+            (err, result) => {
+                if (err) {
+                    console.error("Cloudinary Stream Error Detail:", err);
+                    return reject(err);
+                }
+                resolve(result.secure_url);
+            }
         );
         stream.end(buffer);
     });
@@ -37,16 +43,37 @@ const deleteFromCloudinary = async (url) => {
 const isCloudinaryConfigured = () => (
     Boolean(process.env.CLOUDINARY_CLOUD_NAME)
     && Boolean(process.env.CLOUDINARY_API_KEY)
-    && Boolean(process.env.CLOUDINARY_API_SECRET || process.env.CLOUDINARY_SECRET_KEY)
+    && Boolean(process.env.CLOUDINARY_SECRET_KEY)
 );
 
 const saveHostelImage = async (ownerId, file) => {
     if (!file?.buffer) return null;
 
+    // --- DEBUG LOGS START ---
+    const configStatus = {
+        hasCloudName: Boolean(process.env.CLOUDINARY_CLOUD_NAME),
+        hasApiKey: Boolean(process.env.CLOUDINARY_API_KEY),
+        hasSecretKey: Boolean(process.env.CLOUDINARY_SECRET_KEY),
+        cloudNameValue: process.env.CLOUDINARY_CLOUD_NAME ? "EXISTS" : "MISSING",
+    };
+    
+    console.log("Checking Cloudinary Configuration:", configStatus);
+    console.log("isCloudinaryConfigured() returns:", isCloudinaryConfigured());
+    // --- DEBUG LOGS END ---
+
     if (isCloudinaryConfigured()) {
-        return uploadToCloudinary(file.buffer, 'hostels');
+        console.log(`Uploading to Cloudinary for owner: ${ownerId}`);
+        try {
+            const url = await uploadToCloudinary(file.buffer, 'hostels');
+            console.log("Cloudinary Upload Success:", url);
+            return url;
+        } catch (error) {
+            console.error("Cloudinary Upload Stream Error:", error);
+            // Optional: Choose to fall back or throw error
+        }
     }
 
+    console.warn("Cloudinary not configured or failed. Falling back to local storage.");
     const key = generateObjectKey(`public/images/${ownerId}`, file.originalname);
     await saveBuffer({
         key,

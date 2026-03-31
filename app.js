@@ -123,16 +123,6 @@ const createApp = (env) => {
         res.json({
             message: 'Welcome to SmartHostelFinder API',
             version: '1.0.0',
-            endpoints: {
-                auth: '/api/auth',
-                hostels: '/api/hostels',
-                students: '/api/students',
-                owners: '/api/owners',
-                admin: '/api/admin',
-                bookings: '/api/bookings',
-                payments: '/api/payments',
-                chatbot: '/api/chatbot'
-            }
         });
     });
 
