@@ -1,10 +1,10 @@
 const mongoose = require('mongoose');
-const { getPublicUrl } = require('../services/storageService');
+const { getPublicUrl, getServerBaseUrl } = require('../services/storageService');
 
 const buildPublicImageUrl = (imagePath) => {
     if (!imagePath || /^https?:\/\//i.test(imagePath)) return imagePath;
     if (String(imagePath).startsWith('uploads/')) {
-        const baseUrl = String(process.env.SERVER_URL || 'http://localhost:5100').replace(/\/+$/, '');
+        const baseUrl = getServerBaseUrl();
         return `${baseUrl}/${String(imagePath).replace(/^\/+/, '')}`;
     }
     return getPublicUrl(imagePath);

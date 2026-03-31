@@ -10,6 +10,7 @@ const {
     HeadBucketCommand
 } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
+const { getRequestContext } = require('../middlewares/requestContext');
 
 const STORAGE_PROVIDER = String(process.env.STORAGE_PROVIDER || 'local').trim().toLowerCase();
 const STORAGE_LOCAL_ROOT = path.resolve(
@@ -27,7 +28,8 @@ let cachedS3Client = null;
 const trimSlashes = (value) => String(value || '').replace(/^\/+|\/+$/g, '');
 
 const getServerBaseUrl = () => String(
-    process.env.SERVER_URL
+    getRequestContext()?.origin
+    || process.env.SERVER_URL
     || `http://localhost:${process.env.PORT || 5100}`
 ).replace(/\/+$/, '');
 
@@ -305,6 +307,7 @@ module.exports = {
     STORAGE_PROVIDER,
     STORAGE_LOCAL_ROOT,
     generateObjectKey,
+    getServerBaseUrl,
     saveBuffer,
     deleteObject,
     getPublicUrl,
