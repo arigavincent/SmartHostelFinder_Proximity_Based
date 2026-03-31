@@ -137,9 +137,17 @@ const normalizeHostelPayload = (payload = {}) => {
     return body;
 };
 
+const getOwnerId = (hostel) => {
+    if (!hostel?.owner) return '';
+    if (typeof hostel.owner === 'string') return hostel.owner;
+    if (hostel.owner._id) return String(hostel.owner._id);
+    if (typeof hostel.owner.toString === 'function') return hostel.owner.toString();
+    return '';
+};
+
 const canManageHostel = (hostel, user) => {
     if (!user) return false;
-    return user.role === 'admin' || hostel.owner.toString() === user.id;
+    return user.role === 'admin' || getOwnerId(hostel) === String(user.id);
 };
 
 const getClientFacingError = (error) => {

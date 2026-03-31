@@ -266,6 +266,51 @@ test('student can switch a pending booking payment method to card at checkout', 
     assert.equal(updatedBooking.status, 'confirmed');
 });
 
+test('owner can fetch their own pending hostel for editing', async () => {
+    const owner = await Owner.create({
+        username: 'Pending Hostel Owner',
+        email: 'pending-owner@test.local',
+        password: await hashPassword('Passw0rd'),
+        role: 'owner',
+        isEmailVerified: true,
+        isApproved: true,
+        businessLicense: 'private/documents/pending-hostel-license.pdf'
+    });
+
+    const hostel = await Hostel.create({
+        name: 'Pending Edit Hostel',
+        description: 'Pending approval hostel',
+        owner: owner._id,
+        location: {
+            type: 'Point',
+            coordinates: [37.2783, -0.4989],
+            address: 'Kutus',
+            city: 'Kerugoya',
+            nearbyUniversity: 'Kirinyaga University'
+        },
+        pricePerMonth: 8000,
+        hostelType: 'mixed',
+        totalRooms: 12,
+        availableRooms: 6,
+        amenities: { wifi: true, water: true },
+        images: [],
+        isApproved: false,
+        isActive: true,
+        contactPhone: '0712345678',
+        contactEmail: owner.email
+    });
+
+    const ownerToken = signToken(owner);
+
+    const response = await request(app)
+        .get(`/api/hostels/${hostel._id}`)
+        .set('Authorization', `Bearer ${ownerToken}`);
+
+    assert.equal(response.status, 200);
+    assert.equal(response.body._id, String(hostel._id));
+    assert.equal(response.body.name, 'Pending Edit Hostel');
+});
+
 test('owner verification submission can be reviewed by admin and queues approval email', async () => {
     const admin = await Admin.create({
         username: 'Admin User',
