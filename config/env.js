@@ -42,7 +42,8 @@ const validateEnv = () => {
         serverUrl: process.env.SERVER_URL || `http://localhost:${toNumber(process.env.PORT, 5100)}`,
         corsOrigins: buildCorsOrigins(
             process.env.CORS_ORIGINS || 'http://localhost:3000,http://localhost:5173',
-            process.env.CLIENT_URL || 'http://localhost:3000'
+            process.env.CLIENT_URL || 'http://localhost:5173',
+            'http://localhost:5174'
         ),
         bodyLimit: process.env.BODY_LIMIT || '2mb',
         rateLimitWindowMs: toNumber(process.env.RATE_LIMIT_WINDOW_MS, 15 * 60 * 1000),

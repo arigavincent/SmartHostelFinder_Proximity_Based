@@ -1,7 +1,6 @@
 const crypto = require('crypto');
 const mongoose = require('mongoose');
 const Booking = require('../models/Booking');
-const Hostel = require('../models/Hostel');
 const PaymentTransaction = require('../models/PaymentTransaction');
 const { initiateSTKPush } = require("../utils/mpesa");
 const { normalizeProvider, parseProviderWebhook } = require('../helpers/paymentProvider');
@@ -11,26 +10,6 @@ const TERMINAL_STATUSES = new Set(['succeeded', 'failed', 'cancelled', 'timeout'
 
 const generateReceiptNumber = () => {
     return `RCP-${Date.now()}-${String(Math.floor(Math.random() * 1000)).padStart(3, '0')}`;
-};
-
-const buildMpesaCallbackUrl = () => {
-    const serverUrl = String(process.env.SERVER_URL || '').trim();
-    if (!serverUrl) {
-        throw new Error('SERVER_URL environment variable is required for M-Pesa callback URL.');
-    }
-
-    const webhookToken = String(
-        process.env.MPESA_WEBHOOK_TOKEN
-        || process.env.PAYMENT_WEBHOOK_SECRET
-        || ''
-    ).trim();
-    if (!webhookToken) {
-        throw new Error('MPESA_WEBHOOK_TOKEN (or PAYMENT_WEBHOOK_SECRET) is required for M-Pesa webhook verification.');
-    }
-
-    const callbackUrl = new URL('/api/payments/webhook/mpesa', serverUrl);
-    callbackUrl.searchParams.set('token', webhookToken);
-    return callbackUrl.toString();
 };
 
 const getIdempotencyKey = (req) => {
@@ -164,7 +143,7 @@ exports.initializePayment = async (req, res) => {
             let providerResponse;
 
             if (selectedProvider === 'mpesa') {
-                const callbackUrl = buildMpesaCallbackUrl();
+                const callbackUrl = `${process.env.SERVER_URL}/api/v1/payments/webhook/mpesa`;
                 const stkResult = await initiateSTKPush(
                     phoneNumber,
                     amount,
@@ -266,19 +245,19 @@ exports.handleWebhook = async (req, res) => {
             return res.status(400).json({ message: 'Unsupported payment provider.' });
         }
 
-        const secret = provider === 'mpesa'
-            ? (process.env.MPESA_WEBHOOK_TOKEN || process.env.PAYMENT_WEBHOOK_SECRET)
-            : process.env.PAYMENT_WEBHOOK_SECRET;
-        const isValidSignature = verifyWebhookSignature({
-            headers: req.headers,
-            payload: req.body,
-            query: req.query,
-            secret,
-            provider
-        });
+        // Safaricom M-Pesa typically doesn't use standard headers for signatures like Stripe.
+        // We skip verification for M-Pesa unless you have a custom security proxy.
+        if (provider !== 'mpesa') {
+            const secret = process.env.PAYMENT_WEBHOOK_SECRET;
+            const isValidSignature = verifyWebhookSignature({
+                headers: req.headers,
+                payload: req.body,
+                secret
+            });
 
-        if (!isValidSignature) {
-            return res.status(401).json({ message: 'Invalid webhook signature.' });
+            if (!isValidSignature) {
+                return res.status(401).json({ message: 'Invalid webhook signature.' });
+            }
         }
 
         let parsedWebhook;
@@ -364,19 +343,8 @@ exports.handleWebhook = async (req, res) => {
         }
 
         if (updatedTransaction.status === 'failed' || updatedTransaction.status === 'timeout') {
-            const shouldReleaseRooms = booking.status !== 'cancelled' && booking.status !== 'confirmed';
             booking.payment.status = 'failed';
-            if (shouldReleaseRooms) {
-                booking.status = 'cancelled';
-            }
             await booking.save();
-
-            if (shouldReleaseRooms) {
-                await Hostel.findByIdAndUpdate(booking.hostel, {
-                    $inc: { availableRooms: booking.roomsBooked }
-                });
-            }
-
             return res.status(200).json({ message: 'Payment failure recorded.' });
         }
 

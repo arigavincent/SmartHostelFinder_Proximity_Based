@@ -15,7 +15,6 @@ const uploadToCloudinary = (buffer, folder = 'hostels') =>
             { folder, resource_type: 'image' },
             (err, result) => {
                 if (err) {
-                    console.error("Cloudinary Stream Error Detail:", err);
                     return reject(err);
                 }
                 resolve(result.secure_url);
@@ -49,23 +48,10 @@ const isCloudinaryConfigured = () => (
 const saveHostelImage = async (ownerId, file) => {
     if (!file?.buffer) return null;
 
-    // --- DEBUG LOGS START ---
-    const configStatus = {
-        hasCloudName: Boolean(process.env.CLOUDINARY_CLOUD_NAME),
-        hasApiKey: Boolean(process.env.CLOUDINARY_API_KEY),
-        hasSecretKey: Boolean(process.env.CLOUDINARY_SECRET_KEY),
-        cloudNameValue: process.env.CLOUDINARY_CLOUD_NAME ? "EXISTS" : "MISSING",
-    };
-    
-    console.log("Checking Cloudinary Configuration:", configStatus);
-    console.log("isCloudinaryConfigured() returns:", isCloudinaryConfigured());
-    // --- DEBUG LOGS END ---
-
     if (isCloudinaryConfigured()) {
         console.log(`Uploading to Cloudinary for owner: ${ownerId}`);
         try {
             const url = await uploadToCloudinary(file.buffer, 'hostels');
-            console.log("Cloudinary Upload Success:", url);
             return url;
         } catch (error) {
             console.error("Cloudinary Upload Stream Error:", error);
@@ -73,7 +59,6 @@ const saveHostelImage = async (ownerId, file) => {
         }
     }
 
-    console.warn("Cloudinary not configured or failed. Falling back to local storage.");
     const key = generateObjectKey(`public/images/${ownerId}`, file.originalname);
     await saveBuffer({
         key,
