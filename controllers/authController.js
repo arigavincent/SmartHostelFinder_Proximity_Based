@@ -30,7 +30,7 @@ const uploadLicenseToCloudinary = (buffer, folder = 'licenses', mimetype = '') =
 const isCloudinaryConfigured = () => (
     Boolean(process.env.CLOUDINARY_CLOUD_NAME)
     && Boolean(process.env.CLOUDINARY_API_KEY)
-    && Boolean(process.env.CLOUDINARY_API_SECRET)
+    && Boolean(process.env.CLOUDINARY_API_SECRET || process.env.CLOUDINARY_SECRET_KEY)
 );
 
 const buildAuthUser = (user) => {
