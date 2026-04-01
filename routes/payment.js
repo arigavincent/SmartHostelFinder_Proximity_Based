@@ -7,6 +7,8 @@ router.post('/initialize', verifyStudent, paymentController.initializePayment);
 
 // Booking payment status (student/owner/admin with controller-level access checks)
 router.get('/:bookingId/status', verifyToken, paymentController.getBookingPaymentStatus);
+router.get('/mpesa/callback', paymentController.paymentCallback);
+
 
 // Provider webhook callback (public, signature-verified)
 router.post('/webhook/:provider', paymentController.handleWebhook);

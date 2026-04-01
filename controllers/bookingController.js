@@ -254,64 +254,67 @@ exports.getBookingById = async (req, res) => {
 // Confirm payment - Student compatibility endpoint
 exports.confirmPayment = async (req, res) => {
     try {
-        const { paymentReference, phone, phoneNumber, paymentMethod, provider } = req.body;
-        
+        const { phone, phoneNumber, paymentReference, paymentMethod, provider } = req.body;
+
         const booking = await Booking.findById(req.params.id);
         if (!booking) {
             return res.status(404).json({ message: 'Booking not found.' });
         }
-        
+
         if (booking.student.toString() !== req.user.id) {
             return res.status(403).json({ message: 'Not authorized to confirm this booking.' });
         }
-        
+
         if (booking.status === 'cancelled') {
             return res.status(400).json({ message: 'Cancelled bookings cannot be confirmed.' });
         }
-        
+
         if (booking.payment.status === 'paid' && booking.status === 'confirmed') {
-            return res.status(200).json({ confirmed: true, message: 'Payment already confirmed.', booking: withLegacyDates(booking) });
+            return res.status(200).json({ message: 'Payment already confirmed.', booking });
         }
 
+        // Determine method (support multiple field names for compatibility)
         const selectedMethod = normalizePaymentMethod(paymentMethod || provider) || booking.payment.method;
-        if (!selectedMethod) {
-            return res.status(400).json({ message: 'Payment method must be mpesa or card.' });
-        }
-
         booking.payment.method = selectedMethod;
 
+        // --- Handle Card Payments ---
         if (selectedMethod === 'card') {
-            await finalizePaidBooking(booking, paymentReference || `CARD-${Date.now()}`);
+            booking.payment.reference = paymentReference || `CARD-${Date.now()}`;
+            const confirmed = await confirmAndNotify(booking);
             return res.status(200).json({
-                confirmed: true,
                 message: 'Card payment confirmed.',
-                booking: withLegacyDates(booking)
+                booking: confirmed,
             });
         }
 
+        // --- Handle M-Pesa Payments ---
         const suppliedPhone = String(phoneNumber || phone || '').trim();
         if (!suppliedPhone) {
             return res.status(400).json({ message: 'Phone number is required for M-Pesa payments.' });
         }
 
+        // 1. Check for existing pending transactions (Idempotency)
         const latestTransaction = await PaymentTransaction.findOne({ booking: booking._id })
             .sort({ createdAt: -1 });
 
         if (latestTransaction && ['initiated', 'pending'].includes(latestTransaction.status)) {
             return res.status(200).json({
                 stkPending: true,
+                checkoutRequestID: latestTransaction.providerCheckoutId,
                 message: 'M-Pesa prompt already sent. Complete payment on your phone.'
             });
         }
 
-        const callbackUrl = buildMpesaCallbackUrl();
+        // 2. Initiate STK Push
+        const callbackUrl = `${process.env.SERVER_URL}/api/payments/mpesa/callback`;
         const stkResult = await initiateSTKPush(
             suppliedPhone,
             booking.amount,
-            `Booking Ref: ${booking._id}`,
+            String(booking._id).slice(-12),
             callbackUrl
         );
 
+        // 3. Record Failure
         if (!stkResult.success) {
             await PaymentTransaction.create({
                 booking: booking._id,
@@ -321,13 +324,19 @@ exports.confirmPayment = async (req, res) => {
                 amount: booking.amount,
                 currency: booking.currency || 'KES',
                 status: 'failed',
-                idempotencyKey: `compat-failed-${Date.now()}-${booking._id}`,
+                idempotencyKey: `failed-${Date.now()}-${booking._id}`,
                 failureReason: stkResult.error,
                 rawInitResponse: stkResult
             });
 
-            return res.status(502).json({ message: stkResult.error || 'Failed to initialize M-Pesa payment.' });
+            return res.status(502).json({
+                message: stkResult.error || 'Failed to initiate M-Pesa payment. Please try again.',
+            });
         }
+
+        // 4. Record Success & Update Booking
+        booking.payment.checkoutRequestID = stkResult.checkoutRequestID;
+        await booking.save();
 
         await PaymentTransaction.create({
             booking: booking._id,
@@ -337,7 +346,7 @@ exports.confirmPayment = async (req, res) => {
             amount: booking.amount,
             currency: booking.currency || 'KES',
             status: 'pending',
-            idempotencyKey: `compat-${Date.now()}-${booking._id}`,
+            idempotencyKey: `stk-${Date.now()}-${booking._id}`,
             providerRequestId: stkResult.merchantRequestID,
             providerCheckoutId: stkResult.checkoutRequestID,
             rawInitResponse: stkResult
@@ -345,9 +354,12 @@ exports.confirmPayment = async (req, res) => {
 
         res.status(200).json({
             stkPending: true,
-            message: stkResult.customerMessage || 'Check your phone for the M-Pesa prompt.'
+            checkoutRequestID: stkResult.checkoutRequestID,
+            message: stkResult.customerMessage || 'Please check your phone for the M-Pesa prompt.',
         });
+
     } catch (error) {
+        console.error('confirmPayment error:', error);
         res.status(500).json({ message: error.message || 'Server error.' });
     }
 };

@@ -354,3 +354,82 @@ exports.handleWebhook = async (req, res) => {
         return res.status(500).json({ message: 'Server error.' });
     }
 };
+exports.paymentCallback = async (req, res) => {
+    try {
+        const { Body } = req.body;
+
+        if (!Body || !Body.stkCallback) {
+            logger.warn('mpesa.callback_malformed', { body: req.body });
+            return res.status(400).json({ message: "Invalid callback payload" });
+        }
+
+        const {
+            MerchantRequestID,
+            CheckoutRequestID,
+            ResultCode,
+            ResultDesc,
+            CallbackMetadata
+        } = Body.stkCallback;
+
+        // 1. Find the transaction associated with this checkout
+        const transaction = await PaymentTransaction.findOne({ providerCheckoutId: CheckoutRequestID });
+
+        if (!transaction) {
+            logger.error('mpesa.callback_orphaned', { CheckoutRequestID, ResultCode });
+            // We return 200 to Safaricom so they stop retrying, even if we can't find it
+            return res.status(200).json({ status: "success" });
+        }
+
+        // 2. Handle Failure (ResultCode 0 is success, anything else is a failure/cancel)
+        if (ResultCode !== 0) {
+            transaction.status = 'failed';
+            transaction.failureReason = ResultDesc;
+            await transaction.save();
+
+            await Booking.findByIdAndUpdate(transaction.booking, {
+                'payment.status': 'failed'
+            });
+
+            logger.info('mpesa.payment_failed', { CheckoutRequestID, reason: ResultDesc });
+            return res.status(200).json({ status: "success" });
+        }
+
+        // 3. Handle Success - Extract metadata (Receipt, Phone, Date)
+        const metadata = CallbackMetadata.Item.reduce((acc, item) => {
+            acc[item.Name] = item.Value;
+            return acc;
+        }, {});
+
+        // Update Transaction
+        transaction.status = 'paid';
+        transaction.providerReference = metadata.MpesaReceiptNumber;
+        transaction.paidAt = new Date();
+        transaction.rawCallbackResponse = Body;
+        await transaction.save();
+
+        // 4. Update Booking and Finalize
+        const booking = await Booking.findById(transaction.booking);
+        if (booking) {
+            booking.payment.status = 'paid';
+            booking.payment.reference = metadata.MpesaReceiptNumber;
+            booking.status = 'confirmed';
+            
+            // This function usually handles sending emails/SMS to student and owner
+            await confirmAndNotify(booking); 
+            await booking.save();
+        }
+
+        logger.info('mpesa.payment_success', { 
+            bookingId: transaction.booking, 
+            receipt: metadata.MpesaReceiptNumber 
+        });
+
+        // 5. Always respond to Safaricom with a 200 Success
+        res.status(200).json({ status: "success" });
+
+    } catch (error) {
+        logger.error('mpesa.callback_error', { error: error.message });
+        // Still return 200 to avoid Safaricom's aggressive retry backoff
+        res.status(200).json({ message: "Internal error handled" });
+    }
+};
