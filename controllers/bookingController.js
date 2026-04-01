@@ -4,6 +4,7 @@ const Booking = require('../models/Booking');
 const Hostel = require('../models/Hostel');
 const PaymentTransaction = require('../models/PaymentTransaction');
 const { initiateSTKPush, querySTKStatus } = require('../utils/mpesa');
+const { sendEmailMessage } = require('../services/emailService');
 
 const normalizePaymentMethod = (method) => {
     if (!method) return null;
@@ -165,7 +166,7 @@ exports.createBooking = async (req, res) => {
             return res.status(400).json({ message: 'End date must be after start date.' });
         }
         
-        // Reserve rooms (prevent overbooking)
+        // Reserve rooms (prevent overbooking) - Populating 'owner' to get email details
         const hostel = await Hostel.findOneAndUpdate(
             { 
                 _id: hostelId, 
@@ -175,7 +176,7 @@ exports.createBooking = async (req, res) => {
             },
             { $inc: { availableRooms: -roomsBooked } },
             { new: true }
-        );
+        ).populate('owner'); 
         
         if (!hostel) {
             return res.status(409).json({ 
@@ -197,7 +198,7 @@ exports.createBooking = async (req, res) => {
         const booking = new Booking({
             hostel: hostel._id,
             student: req.user.id,
-            owner: hostel.owner,
+            owner: hostel.owner._id,
             roomsBooked,
             startDate: checkIn,
             endDate: checkOut,
@@ -212,6 +213,37 @@ exports.createBooking = async (req, res) => {
         let savedBooking;
         try {
             savedBooking = await booking.save();
+
+            // --- EMAIL NOTIFICATIONS ---
+            
+            // 1. Notify the Owner
+            if (hostel.owner && hostel.owner.email) {
+                sendEmailMessage({
+                    to: hostel.owner.email,
+                    subject: 'New Booking Received',
+                    html: `
+                        <h3>New Booking for ${hostel.name}</h3>
+                        <p>A student has reserved <b>${roomsBooked} room(s)</b>.</p>
+                        <p><b>Dates:</b> ${checkIn.toDateString()} - ${checkOut.toDateString()}</p>
+                        <p>Please review the booking in your dashboard and contact the student with further instructions.</p>
+                    `
+                }).catch(err => console.error('Owner email failed:', err));
+            }
+
+            // 2. Notify the Student
+            if (req.user && req.user.email) {
+                sendEmailMessage({
+                    to: req.user.email,
+                    subject: 'Booking Confirmation - Pending Payment',
+                    html: `
+                        <h3>Your booking for ${hostel.name} is reserved!</h3>
+                        <p>You have successfully placed a booking for ${roomsBooked} room(s).</p>
+                        <p><b>Note:</b> You will receive further instructions directly from the hostel owner regarding move-in details and rules.</p>
+                        <p>Total Amount: KES ${bookingAmount}</p>
+                    `
+                }).catch(err => console.error('Student email failed:', err));
+            }
+
         } catch (saveError) {
             await Hostel.findByIdAndUpdate(hostel._id, {
                 $inc: { availableRooms: roomsBooked }
@@ -220,10 +252,11 @@ exports.createBooking = async (req, res) => {
         }
         
         res.status(201).json({
-            message: 'Booking created. Pending payment confirmation.',
+            message: 'Booking created. Notifications have been sent.',
             booking: savedBooking
         });
     } catch (error) {
+        console.error(error);
         res.status(500).json({ message: 'Server error.' });
     }
 };
@@ -367,14 +400,57 @@ exports.confirmPayment = async (req, res) => {
 // Verify M-Pesa payment polling compatibility endpoint
 exports.verifyMpesaPayment = async (req, res) => {
     try {
-        const booking = await Booking.findById(req.params.id);
+        // Populating hostel and owner to get email details for notifications
+        const booking = await Booking.findById(req.params.id)
+            .populate({
+                path: 'hostel',
+                populate: { path: 'owner' }
+            })
+            .populate('student');
+
         if (!booking) {
             return res.status(404).json({ message: 'Booking not found.' });
         }
 
-        if (booking.student.toString() !== req.user.id) {
+        if (booking.student._id.toString() !== req.user.id) {
             return res.status(403).json({ message: 'Not authorized to verify this booking payment.' });
         }
+
+        // Helper to send success emails
+        const sendSuccessEmails = async (booking) => {
+            const ownerEmail = booking.hostel.owner.email;
+            const studentEmail = booking.student.email;
+            const hostelName = booking.hostel.name;
+
+            // 1. Notify Owner of Payment
+            if (ownerEmail) {
+                sendEmailMessage({
+                    to: ownerEmail,
+                    subject: `Payment Confirmed: ${hostelName}`,
+                    html: `
+                        <h3>Payment Received!</h3>
+                        <p>The payment for the booking at <b>${hostelName}</b> has been successfully verified.</p>
+                        <p><b>Amount:</b> KES ${booking.amount}</p>
+                        <p><b>Reference:</b> ${booking.payment.providerReference || 'M-Pesa'}</p>
+                        <p>Please prepare for the student's arrival as per the booking dates.</p>
+                    `
+                }).catch(err => console.error('Owner payment email failed:', err));
+            }
+
+            // 2. Notify Student of Confirmation
+            if (studentEmail) {
+                sendEmailMessage({
+                    to: studentEmail,
+                    subject: `Payment Successful - ${hostelName}`,
+                    html: `
+                        <h3>Your payment was successful!</h3>
+                        <p>Your booking at <b>${hostelName}</b> is now fully confirmed.</p>
+                        <p><b>Next Steps:</b> The owner has been notified. You can now reach out to them for move-in instructions if they haven't contacted you yet.</p>
+                        <p>Thank you for using SmartHostelFinder!</p>
+                    `
+                }).catch(err => console.error('Student payment email failed:', err));
+            }
+        };
 
         if (booking.payment.status === 'paid' && booking.status === 'confirmed') {
             return res.status(200).json({ confirmed: true, booking: withLegacyDates(booking) });
@@ -389,17 +465,19 @@ exports.verifyMpesaPayment = async (req, res) => {
             return res.status(404).json({ failed: true, message: 'No M-Pesa payment transaction found for this booking.' });
         }
 
+        // CASE 1: Transaction already marked as succeeded in DB
         if (latestTransaction.status === 'succeeded') {
             await finalizePaidBooking(
                 booking,
-                latestTransaction.providerReference
-                || latestTransaction.providerTransactionId
-                || latestTransaction.providerRequestId
+                latestTransaction.providerReference || latestTransaction.providerTransactionId || latestTransaction.providerRequestId
             );
+            
+            await sendSuccessEmails(booking); // Trigger Emails
 
             return res.status(200).json({ confirmed: true, booking: withLegacyDates(booking) });
         }
 
+        // CASE 2: Transaction clearly failed
         if (['failed', 'cancelled', 'timeout'].includes(latestTransaction.status)) {
             await markBookingPaymentFailed(booking);
             return res.status(200).json({
@@ -412,11 +490,13 @@ exports.verifyMpesaPayment = async (req, res) => {
             return res.status(200).json({ pending: true, message: 'Payment is still pending.' });
         }
 
+        // CASE 3: Query M-Pesa API for status
         const stkStatus = await querySTKStatus(latestTransaction.providerCheckoutId);
         if (!stkStatus.success) {
             return res.status(200).json({ pending: true, message: 'Still waiting for payment confirmation.' });
         }
 
+        // Payment Success from API
         if (stkStatus.resultCode === '0') {
             latestTransaction.status = 'succeeded';
             latestTransaction.providerReference = latestTransaction.providerReference || latestTransaction.providerTransactionId;
@@ -425,14 +505,15 @@ exports.verifyMpesaPayment = async (req, res) => {
 
             await finalizePaidBooking(
                 booking,
-                latestTransaction.providerReference
-                || latestTransaction.providerTransactionId
-                || latestTransaction.providerRequestId
+                latestTransaction.providerReference || latestTransaction.providerTransactionId || latestTransaction.providerRequestId
             );
+
+            await sendSuccessEmails(booking); // Trigger Emails
 
             return res.status(200).json({ confirmed: true, booking });
         }
 
+        // Payment Failed from API
         if (['1032', '1037', '1', '2001'].includes(String(stkStatus.resultCode))) {
             latestTransaction.status = ['1037'].includes(String(stkStatus.resultCode)) ? 'timeout' : 'failed';
             latestTransaction.failureCode = String(stkStatus.resultCode);
@@ -459,12 +540,19 @@ exports.verifyMpesaPayment = async (req, res) => {
 // Cancel booking (Student)
 exports.cancelBooking = async (req, res) => {
     try {
-        const booking = await Booking.findById(req.params.id);
+        // Populating to get owner email and hostel name for the notification
+        const booking = await Booking.findById(req.params.id)
+            .populate({
+                path: 'hostel',
+                populate: { path: 'owner' }
+            })
+            .populate('student');
+
         if (!booking) {
             return res.status(404).json({ message: 'Booking not found.' });
         }
         
-        if (booking.student.toString() !== req.user.id) {
+        if (booking.student._id.toString() !== req.user.id) {
             return res.status(403).json({ message: 'Not authorized to cancel this booking.' });
         }
         
@@ -475,11 +563,45 @@ exports.cancelBooking = async (req, res) => {
         booking.status = 'cancelled';
         await booking.save();
         
-        // Release rooms
+        // Release rooms back to the hostel inventory
         await releaseReservedRooms(booking);
+
+        // --- EMAIL NOTIFICATIONS ---
+        const hostelName = booking.hostel.name;
+        const ownerEmail = booking.hostel.owner.email;
+        const studentEmail = booking.student.email;
+
+        // 1. Notify the Owner that a booking was cancelled
+        if (ownerEmail) {
+            sendEmailMessage({
+                to: ownerEmail,
+                subject: `Booking Cancelled: ${hostelName}`,
+                html: `
+                    <h3>Cancellation Notice</h3>
+                    <p>Hello,</p>
+                    <p>The booking for <b>${hostelName}</b> (Ref: ${booking._id}) has been cancelled by the student.</p>
+                    <p>The <b>${booking.roomsBooked} room(s)</b> have been released back into your available inventory.</p>
+                `
+            }).catch(err => console.error('Owner cancellation email failed:', err));
+        }
+
+        // 2. Notify the Student confirming their cancellation
+        if (studentEmail) {
+            sendEmailMessage({
+                to: studentEmail,
+                subject: `Booking Cancelled Successfully`,
+                html: `
+                    <h3>Your cancellation is confirmed</h3>
+                    <p>Your booking at <b>${hostelName}</b> has been successfully cancelled.</p>
+                    <p>If you have already made a payment, please contact support regarding the refund policy.</p>
+                    <p>We hope to help you find another stay soon!</p>
+                `
+            }).catch(err => console.error('Student cancellation email failed:', err));
+        }
         
-        res.status(200).json({ message: 'Booking cancelled successfully.' });
+        res.status(200).json({ message: 'Booking cancelled successfully and notifications sent.' });
     } catch (error) {
+        console.error(error);
         res.status(500).json({ message: 'Server error.' });
     }
 };
